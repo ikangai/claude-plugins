@@ -1,0 +1,6 @@
+# The chat database is local runtime state, not source. Code & hooks are tracked.
+chat.db
+chat.db-wal
+chat.db-shm
+__pycache__/
+*.pyc
