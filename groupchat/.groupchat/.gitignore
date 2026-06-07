@@ -2,5 +2,8 @@
 chat.db
 chat.db-wal
 chat.db-shm
+# Generated room dashboard (read-only view; regenerate with dashboard.py)
+room.html
+room.html.tmp
 __pycache__/
 *.pyc

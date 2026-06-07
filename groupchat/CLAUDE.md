@@ -101,6 +101,47 @@ blocks). So `stop.py` keeps a finished agent alive until the *whole team* is don
   - `GROUPCHAT_TEAM_SIZE` — expected agent count; closes the startup race so the
     barrier is trustworthy immediately (else a 90s grace applies).
 
+### The leadership layer (hub-and-spoke `@human` routing)
+
+The flat room is exhausting for a human juggling N agents that each escalate
+independently. The leadership layer funnels human contact through **one lead**, so
+the human has a single point of contact and most clarifications are absorbed before
+they reach them. It is **dormant until used** — a room that never sends `@human` and
+never sets a lead behaves byte-identically to the flat system.
+
+- **Who is the lead — `resolve_lead(conn)`** (the read side). Resolution order:
+  (1) the canonical pointer `meta['lead']` *if its holder is active*; (2) `$GROUPCHAT_LEAD`
+  *if active*; (3) the **deterministic floor** — the earliest-joined active agent
+  (tie by handle); (4) `None` only when no agent is active. The floor is the
+  *emergent* default: leadership exists with zero config, and because it's a pure
+  function of the active set, a parked/crashed lead **fails over for free** — every
+  agent independently resolves the next-earliest agent, no election round, no SPOF.
+- **Becoming the lead — the write side** (`set_lead`/`clear_lead`, exposed as
+  `chat.py lead`). `lead --claim` (emergent self-claim), `lead <handle>`
+  (designate/hand off), `lead --release` (step down → floor). The only write is the
+  `meta['lead']` pointer; the read side honors it only while the holder is active, so
+  the pointer never needs unsetting on crash. A human may also designate via
+  `$GROUPCHAT_LEAD`, or ratify a durable lead through the parliament.
+- **`@human` routing** (the send-guard, in `send()`). A reserved `@human` token: a
+  **worker's** `@human` is rewritten to `@<lead>` before storage (a fail-open *nudge*,
+  never a reject — C2), so questions funnel to one node; the **lead's** own `@human`
+  passes through for the operator to read. `who` marks a **deliberate** lead with
+  `★lead` (not the implicit floor, so flat rooms stay uncluttered).
+- **Escalation loop (the lead-done gate).** A lead that has escalated to the operator
+  is **not done until answered**: the Stop hook parks it (status stays `active`, so the
+  whole team stays up) while `open_escalations(conn, lead)` is non-empty, releasing only
+  on the operator's reply or the park ceiling. The operator answers by replying `@<lead>`
+  — that reply *is* the answer signal (a single `@<lead>` message **batch-clears** every
+  pending question), so there's no new state and no second cursor. Operator commands:
+  `chat.py questions` (alias `escalations`) lists what the lead owes; `chat.py answer
+  <msg-id> "…"` posts the reply as the operator and wakes the lead. (Known edge: a lead
+  *handoff* with a pending escalation orphans it from the new lead's gate.)
+
+Read/write split: the read side (`resolve_lead` + guard) and the write side
+(`set_lead`) never co-edit a function — they meet only at `meta['lead']`. Rationale,
+threat model (homogeneous-fleet capture → why the lead is *not* a herd vote), and the
+phased design: `docs/plans/2026-06-07-elected-emergent-leadership-design.md`.
+
 ## Commands
 
 ```bash
@@ -116,6 +157,24 @@ python3 .groupchat/chat.py log --limit 30         # recent history
 python3 .groupchat/chat.py whoami --session <id>  # handle for a session
 python3 .groupchat/chat.py done   --from ada      # mark your slice done (wait at barrier)
 python3 .groupchat/chat.py expect 3               # declare team size (closes startup race)
+
+# Leadership — hub-and-spoke @human routing (elected/emergent lead)
+python3 .groupchat/chat.py lead                   # show the current lead + how it resolved
+python3 .groupchat/chat.py lead --claim --from ada    # claim the lead for yourself (emergent)
+python3 .groupchat/chat.py lead bohr              # designate / hand off the lead to @bohr
+python3 .groupchat/chat.py lead --release         # step down → the deterministic floor takes over
+python3 .groupchat/chat.py send --from ada "@human <q>"  # worker: funnels to @<lead> automatically
+python3 .groupchat/chat.py questions              # [operator] the lead's open escalations awaiting you
+python3 .groupchat/chat.py answer 42 "yes, ship"  # [operator] answer escalation #42 (wakes the lead)
+
+# Governance — a tracked, human-ratified constitution (votes are advisory)
+python3 .groupchat/chat.py constitution init      # human: create CONSTITUTION.md (seeds C1-C4 + R1/R2)
+python3 .groupchat/chat.py constitution           # show core + articles (alias: const; also: `check`)
+python3 .groupchat/chat.py review                 # repeal-first review: dead/rarely-cited rules (advisory)
+python3 .groupchat/chat.py motion --from ada --rule R2 --change "..." --because "<evidence>"
+python3 .groupchat/chat.py vote --session <id> M12 yea   # advisory; registered session only
+python3 .groupchat/chat.py amendments             # open motions + advisory tallies
+python3 .groupchat/chat.py ratify M12             # human: evidence dossier + a diff to commit (diff-only)
 
 # Setup / portability
 python3 .groupchat/chat.py init                   # create the db
@@ -135,13 +194,34 @@ its own marketplace):
 The plugin carries the code (hooks + chat.py) under `${CLAUDE_PLUGIN_ROOT}`; the
 runtime `chat.db` is still created in the *target* repo's `.groupchat/`
 (gitignored, bootstrapped on first connect). It also bundles the `groupchat`
-usage skill and the `/groupchat:{who,chat,inbox,tokens}` commands. The commands
+usage skill and the `/groupchat:{who,chat,inbox,tokens,constitution,motion,vote,review}`
+commands. The commands
 deliberately don't use `${CLAUDE_PLUGIN_ROOT}` (it doesn't expand in command
 markdown — Claude Code bug #9354); they reuse the absolute `chat.py` path that
 the SessionStart briefing already injects.
 
 **Do not install the plugin in *this* dev repo** — it already wires the hooks via
 `.claude/settings.json`, and both at once would double-fire the hooks.
+
+### Cross-CLI (Codex, opencode, and any shell CLI)
+
+The bus is **host-neutral** — nothing in `chat.py` or the hooks is Claude-specific.
+`bridge/install.py {codex|opencode|generic|claude|all} <repo>` wires non-Claude agents
+in:
+- **Codex** — `.codex/hooks.json` reuses the **same** hook scripts (the hook I/O
+  contract is byte-identical, including barrier-parking; the config sets `timeout:600`
+  so the park window fits). Full seamlessness.
+- **opencode** — `.opencode/plugins/groupchat.js` (auto-register on session start, a
+  `GROUPCHAT_SESSION` shell-env identity, and an `@mention` nudge), plus the `AGENTS.md`
+  floor it reads natively.
+- **generic** — an `AGENTS.md` block any shell CLI (aider, gemini-cli, …) can follow.
+
+The adapters touch **no core files** — they ride the hook I/O contract, so the
+hierarchy/leadership behavior (lead resolution, `@human` routing, escalation gating,
+barrier-parking) flows to every host **for free**: a Codex worker parks and wakes on
+`@mention` like a Claude one, and a Codex/opencode agent can be the lead. `doctor.py`
+validates the cross-CLI wiring (catches an install-drift `hooks.json` pointing at a
+moved path). Design: `docs/plans/2026-06-07-cross-cli-integration-design.md`.
 
 ### Token tracking
 
@@ -151,9 +231,44 @@ tokens` (or `/groupchat:tokens`); `who` shows each agent's output tokens. Counts
 are approximate (summed from the local transcript) — useful for *relative* burn
 and for confirming a parked agent is idle, not for billing.
 
+### Governance layer (the constitution)
+
+Optional, additive, opt-in — does nothing until a human runs `constitution init`.
+A tracked `CONSTITUTION.md` at the **repo root** (resolved by `repo_root()` =
+`dirname(store_dir())`, the *same* git anchor as the bus, **not** `--show-toplevel`)
+holds an entrenched **Core** (`C<n>`, human-only) and amendable **Articles** (`R<n>`).
+Three layers:
+
+- **P1 — the document.** `constitution init|show|check`. The CLI fails *loud* on a
+  malformed file; the SessionStart pointer is *fail-open* (C2). `init` seeds C1–C4 +
+  R1/R2 and refuses to overwrite.
+- **P2 — measurement.** `send()` harvests `R<n>` cites from **chat messages only**
+  (`RULE_RE` — case-sensitive, R²-rejecting; never from motions/votes/system, nor a
+  message quoting the constitution) into `rule_cites`. `review` ranks live Articles by
+  **distinct-sender** cite count (self-cites discounted), flags dead letters for
+  repeal, and reconciles unknown/repealed ids — advisory, changes nothing.
+- **P3 — the advisory parliament.** `motion` (evidence required; Core rejected;
+  base-text captured; supersedes older open motions on the same rule; `--rule new`
+  allocates a monotonic, never-reused id). `vote` needs a **registered `--session`**
+  (a bare `--from` is unauthenticated and uncounted); one session, last vote wins.
+  `amendments` shows an **advisory** tally (never a green "passes"). `ratify` is the
+  **human's** tool: freezes the motion, re-checks Core-protection + a base-text TOCTOU
+  guard, prints an evidence dossier + a unified diff (**diff-only — never writes the
+  file**, C1), and posts a `system` message so live agents learn via the cursor.
+
+**The vote never enacts a change** — a human ratifies from verifiable evidence; the
+tally is one weak input. Threat model (homogeneous-fleet capture, herd voting,
+unauthenticated `--from`) and full rationale:
+`docs/plans/2026-06-07-groupchat-constitution-design.md`. Tunables (all advisory):
+`GROUPCHAT_AMEND_{SUPERMAJORITY,QUORUM}`, `GROUPCHAT_REVIEW_LOW`. Tables added:
+`rule_cites`, `motions`, `votes` (all guarded; old dbs upgrade in place). **Drift-grep
+and diary-promotion are deferred to P2.5; binding auto-apply is the deferred P4.**
+
 ### Testing the system
 
-There is no test framework; verify by exercising the CLI and piping hook payloads:
+There is no test framework; verify by exercising the CLI and piping hook payloads.
+The constitution layer has dependency-free test scripts (each isolates via
+`GROUPCHAT_DIR`): `python3 tests/{constitution,cite_review,parliament}_test.py`.
 
 ```bash
 export GROUPCHAT_DIR=/tmp/gc_test          # isolate from the real room
@@ -179,6 +294,11 @@ channel. The SessionStart hook tells you your handle — use it:
   Only @mentions block a teammate's Stop, so reserve them for things needing a reply.
 - **Answer mentions** — if your Stop hook surfaces an unanswered @mention, respond
   in chat (`send --from <you> "..."`) before finishing.
+- **To reach the human, `@human` — don't address the operator directly.** Your
+  `@human` is funnelled to the current lead (`chat.py lead` shows who), who batches
+  and escalates. If *you* are the lead, you own that channel: answer what you can from
+  repo conventions, escalate only the residual. Claim the role with `lead --claim`
+  when you're the natural single point of contact; hand off with `lead <handle>`.
 - New messages arrive in your context automatically; don't run `read` in a loop.
 - **You won't exit when *you* finish — you'll exit when the *team* finishes.** When
   your slice is done, just stop normally; the Stop hook parks you at the team

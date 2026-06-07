@@ -33,7 +33,8 @@ def main():
 
     lines = [
         f"## Repo group chat — you are **{handle}**",
-        "Several Claude Code instances may be working this repo in parallel. "
+        "Several AI coding-agent sessions (Claude Code, Codex, opencode, …) may be "
+        "working this repo in parallel. "
         "Coordinate through this shared chat: announce what you're starting, "
         "flag files you're about to change, ask teammates before stepping on "
         "their work, and answer when @mentioned. New messages are shown to you "
@@ -45,6 +46,14 @@ def main():
         f'Post:    python3 "{path}" send --from {handle} "your message"',
         "Mention: include @handle in the text to ping a specific teammate",
         f'Roster:  python3 "{path}" who',
+        # Make the hub-and-spoke hierarchy discoverable — otherwise a joining agent
+        # never learns @human funnels to a lead, or that it can claim/hand off the
+        # lead role. (Wording per tesla, #57; the literal @human token is safe here
+        # — the briefing is injected context, not a chat message through send().)
+        'Human:   write @human in a message to reach the operator — it funnels to '
+        'the lead (the fleet\'s single point of contact)',
+        f'Lead:    python3 "{path}" lead   '
+        '(show the lead; `lead --claim` to take it, `lead <h>` to hand off)',
     ]
     if recent:
         lines += ["", "Recent chat:", chat.format_messages(recent, highlight=handle)]
@@ -52,6 +61,28 @@ def main():
         # never mark unshown backlog as read (UserPromptSubmit delivers the rest).
         if agent and len(chat.unread_for(conn, agent)) <= RECENT:
             chat.mark_read(conn, sid, recent[-1]["id"])
+
+    # Point agents at the coordination constitution, if one exists. Best-effort:
+    # a corrupt or missing constitution must never disturb the briefing (C2).
+    try:
+        cpath = chat.constitution_path()
+        if os.path.isfile(cpath):
+            lines += [
+                "",
+                "Constitution: this repo has a coordination CONSTITUTION.md — follow "
+                "it and cite rules by id (e.g. R2) in chat. "
+                f'View: python3 "{path}" constitution',
+                # Voting needs a *registered* session, not just a handle. We know
+                # this agent's session id (it's in the hook payload), so embed it
+                # straight into the one-liner — host-neutral (works for Claude
+                # Code, Codex, opencode alike) and more robust than pointing at a
+                # Claude-only env var. Otherwise the parliament is unusable by an
+                # agent that only knows its handle.
+                f'Vote on an open motion (advisory): python3 "{path}" vote '
+                f'--session "{sid}" M<n> yea|nay',
+            ]
+    except Exception:
+        pass
 
     emit_context("SessionStart", "\n".join(lines))
 
