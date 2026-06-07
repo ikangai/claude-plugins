@@ -93,11 +93,22 @@ def main():
         chat.del_meta(conn, park_key)  # doing real work -> reset the park clock
         return
 
-    # 2. Trying to stop with an empty inbox == "my slice is done".
-    chat.set_status(conn, sid, chat.DONE_STATUS)
+    # 2. P2 — a lead that escalated to the operator is NOT done until answered.
+    #    The operator's reply (@<lead>) wakes it via _block_on_mention above; until
+    #    then it parks so the team never tears down with a question still open. No
+    #    new state — the open queue is derived from the message log; the ceiling
+    #    still releases it as a fail-safe if the operator never replies.
+    lead = chat.resolve_lead(conn)
+    awaiting_operator = bool(
+        lead and agent["handle"] == lead and chat.open_escalations(conn, lead))
 
-    # 3. Barrier: only exit when the whole team is done.
-    if chat.team_done(conn):
+    # Trying to stop with an empty inbox == "my slice is done" — unless we're the
+    # lead still owing the operator a reply.
+    chat.set_status(conn, sid, "active" if awaiting_operator else chat.DONE_STATUS)
+
+    # 3. Barrier: exit only when the whole team is done AND we owe the operator
+    #    nothing. An awaiting lead keeps the team up so no answer is lost.
+    if not awaiting_operator and chat.team_done(conn):
         chat.del_meta(conn, park_key)
         return  # allow stop — everyone is finished
 
@@ -132,13 +143,21 @@ def main():
             return  # allow stop
 
     # Window elapsed with nothing new: cheap re-park so Claude doesn't busy-spin.
-    waiting = [a["handle"] for a in chat.active_agents(conn)
-               if (a["status"] or "") != chat.DONE_STATUS]
-    who = ", ".join(waiting) if waiting else "teammates"
-    reason = (
-        f"Still waiting at the team barrier — {who} not finished yet. "
-        "Nothing for you to do; you may stop (you'll keep waiting)."
-    )
+    if awaiting_operator:
+        n = len(chat.open_escalations(conn, lead))
+        reason = (
+            f"Parked: you're the lead awaiting the operator's reply on {n} open "
+            "@human escalation(s). You'll wake when an operator message @mentions "
+            "you; until then the team stays up. You may stop (you'll keep waiting)."
+        )
+    else:
+        waiting = [a["handle"] for a in chat.active_agents(conn)
+                   if (a["status"] or "") != chat.DONE_STATUS]
+        who = ", ".join(waiting) if waiting else "teammates"
+        reason = (
+            f"Still waiting at the team barrier — {who} not finished yet. "
+            "Nothing for you to do; you may stop (you'll keep waiting)."
+        )
     print(json.dumps({"decision": "block", "reason": reason}))
 
 
