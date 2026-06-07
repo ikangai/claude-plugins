@@ -373,9 +373,12 @@ def del_meta(conn, key: str) -> None:
 # Agent registry & identity
 # --------------------------------------------------------------------------- #
 def _assign_handle(conn: sqlite3.Connection, preferred: str | None = None) -> str:
-    # Reserved names (e.g. "human") count as taken so the @human escalation token
-    # can never collide with a real agent handle.
-    taken = {r["handle"] for r in conn.execute("SELECT handle FROM agents")} | set(RESERVED_HANDLES)
+    # Only *active* handles are taken — a closed/idle session's name is free to
+    # recycle, so the pool doesn't march forward (ada→turing→…→agent-N) and the
+    # agents table doesn't grow unbounded. An active session never loses its handle.
+    # Reserved names (e.g. "human") stay taken so the @human escalation token can
+    # never collide with a real agent handle.
+    taken = {a["handle"] for a in active_agents(conn)} | set(RESERVED_HANDLES)
     if preferred:
         cand = re.sub(r"[^a-z0-9_-]", "", preferred.lower()) or "agent"
         if cand not in taken:
@@ -423,6 +426,34 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
     # grab the same one concurrently.
     for _ in range(len(HANDLE_POOL) + 50):
         h = _assign_handle(conn, handle)
+        # Reclaim a recycled name: if this handle is held by an INACTIVE agent
+        # (a closed/idle session), drop the dead row so the UNIQUE INSERT below
+        # succeeds — that's how a restarted shell keeps its GROUPCHAT_HANDLE and how
+        # pool names get reused. _assign_handle never returns an actively-held handle,
+        # so we only ever delete a dead identity; the `_is_active` guard means a race
+        # that revived the holder is left alone and the INSERT just retries.
+        stale = conn.execute(
+            "SELECT session_id, last_seen FROM agents WHERE handle = ?", (h,)
+        ).fetchone()
+        if stale and not _is_active(stale["last_seen"]):
+            # Re-assert staleness IN the DELETE (not just the check above): if the
+            # holder revived in between — a TOCTOU where its own re-register /
+            # set_status / mark_read refreshed last_seen — the guarded DELETE matches
+            # 0 rows, the INSERT below collides on the UNIQUE handle, and the retry
+            # loop falls through to a different name. So an active session can never
+            # lose its handle (or its read cursor) to a newcomer reusing the name.
+            cutoff = datetime.fromtimestamp(
+                _now_epoch() - ACTIVE_WINDOW_SECONDS, timezone.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            cur = conn.execute(
+                "DELETE FROM agents WHERE session_id = ? AND (last_seen IS NULL OR last_seen < ?)",
+                (stale["session_id"], cutoff),
+            )
+            # Only if a row was actually retired, and it was the lead, drop the stale
+            # pointer so a name-reuser doesn't inherit leadership — resolve_lead's
+            # floor re-elects instead. (Routing reads meta['lead']; hierarchy layer.)
+            if cur.rowcount and (get_meta(conn, "lead") or "").strip().lower() == h:
+                del_meta(conn, "lead")
         try:
             conn.execute(
                 "INSERT INTO agents(session_id, handle, cwd, pid, status, "

@@ -4,6 +4,24 @@ All notable changes to **groupchat** — the coordination bus for parallel AI
 coding-agent sessions on one repo. Published as a Claude Code plugin in the
 `ikangai/claude-plugins` marketplace.
 
+## v0.3.0 — 2026-06-07
+
+### Identity — recycle handles + name a shell at launch
+- **Name a shell:** start the CLI with `GROUPCHAT_HANDLE=frontend claude` and that
+  session's agent is born `frontend`, so the roster (`who` / the dashboard) tells you
+  which terminal is which. Honored only while the name is free — it never steals an
+  active teammate's handle (falls back to `name-2`).
+- **Recycling:** "taken" now means *currently active* only, so a closed/idle
+  session's handle is reclaimed for the next one. The pool no longer marches
+  `ada → … → agent-N` and the `agents` table no longer grows unbounded across
+  restarts; a restarted shell with the same `GROUPCHAT_HANDLE` keeps its name.
+- The **"an active session keeps its handle for life"** invariant is preserved by a
+  TOCTOU-guarded reclaim: the delete re-asserts staleness, so a holder that revives
+  mid-reclaim survives and the newcomer retries a different name. Reclaiming the
+  lead's handle clears the `meta['lead']` pointer so a name-reuser can't inherit
+  leadership. (Caveat: a lead pinned via the `$GROUPCHAT_LEAD` *env var* can't be
+  cleared from code.)
+
 ## v0.2.0 — 2026-06-07
 
 Everything added since the initial marketplace cut (v0.1.0). All additive and

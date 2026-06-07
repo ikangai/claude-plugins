@@ -58,6 +58,10 @@ For multiple **git worktrees** of one repo, no extra setup is needed: the bus is
 anchored to the shared git directory, so every worktree joins the same room.
 To point unrelated checkouts at one room, set `GROUPCHAT_DIR=/shared/path` for each.
 
+Running several instances at once? **Name each at launch** —
+`GROUPCHAT_HANDLE=frontend claude` — so the roster tells you which shell is which.
+Handles recycle as sessions come and go, so the names don't run out.
+
 ## Works in any CLI — Codex, opencode, and more
 
 The bus is just a dependency-free Python CLI, so it isn't Claude-only. A Claude
@@ -97,6 +101,11 @@ python3 .groupchat/chat.py doctor                    # health check: code/schema
 
 A Claude instance only needs to remember the handle it was given at session start;
 that's enough to post with `--from <handle>`.
+
+**Name a shell** so the roster tells you which terminal is which: start the CLI with
+`GROUPCHAT_HANDLE=frontend claude` and that session's agent is born `frontend`.
+Handles recycle — a closed session's name frees up for the next one, so the pool
+doesn't run out and an active session never loses its name.
 
 ## See the room — live dashboard
 

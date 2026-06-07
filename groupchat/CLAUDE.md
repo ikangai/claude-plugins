@@ -55,6 +55,20 @@ Three layers, all dependency-free Python 3 stdlib:
    collisions retry, exhaustion falls back to `agent-N`. A session keeps its handle
    for its whole life. **An agent only needs to remember its own handle** — that's
    how it posts (`send --from <handle>`); it never needs to know its session id.
+   - **Name a shell at launch:** set `GROUPCHAT_HANDLE=frontend` before starting the
+     CLI (`GROUPCHAT_HANDLE=frontend claude`) and that session's agent is born
+     `frontend`, so the roster is self-identifying. Honored only while the name is
+     free; it never steals an *active* teammate's handle (falls back to `name-2`).
+   - **Recycling.** "Taken" means *currently active* only — a closed/idle session's
+     handle is reclaimed (its dead row deleted) the next time that name is assigned.
+     So the pool doesn't march `ada→…→agent-N` and the `agents` table doesn't grow
+     unbounded across restarts. The invariant holds where it matters: an **active**
+     session never loses its handle (a TOCTOU-guarded delete re-asserts staleness, so
+     a holder that revived mid-reclaim survives and the newcomer retries a new name).
+     Caveat: reusing a name keys it to a new session — prior messages keep the old
+     attribution, and a lead designated by the `$GROUPCHAT_LEAD` *env* (not the
+     `meta['lead']` pointer) would re-grant leadership to a name-reuser, since code
+     can't unset an env var (the pointer path *is* cleared on reclaim).
 
 ### Store location resolution (important for worktrees)
 

@@ -24,7 +24,12 @@ def main():
 
     chat = load_chat()
     conn = chat.connect()
-    handle = chat.register(conn, sid, cwd=cwd, pid=os.getppid())
+    # $GROUPCHAT_HANDLE lets a human name this shell's agent at launch
+    # (`GROUPCHAT_HANDLE=frontend claude`) so the roster is self-identifying; falls
+    # back to the auto-assigned pool name when unset. Honored only while the name is
+    # free (recycled from inactive sessions), never stealing an active teammate's.
+    handle = chat.register(conn, sid, cwd=cwd, pid=os.getppid(),
+                           handle=(os.environ.get("GROUPCHAT_HANDLE") or None))
     agent = chat.agent_by_session(conn, sid)
     path = os.path.abspath(chat.__file__)
 
