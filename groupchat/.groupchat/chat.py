@@ -215,6 +215,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # Token-usage columns (added post-v1; guarded so old dbs upgrade in place).
     for _col in ("in_tokens", "out_tokens", "cache_read_tokens", "cache_create_tokens"):
         _add_column_if_missing(conn, "agents", _col, "INTEGER NOT NULL DEFAULT 0")
+    # Optional short heading for an add-motion's Article (else the (new rule) placeholder).
+    _add_column_if_missing(conn, "motions", "title", "TEXT")
     conn.execute(
         "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -1553,7 +1555,8 @@ def _apply_amendment(text: str, m, today: str) -> str:
             return text
         prov = {"id": m["new_id"], "added": today, "by": m["proposer"],
                 "ratified": today, "amended": "", "source": f"M{m['id']}"}
-        block = (f"### {m['new_id']} — (new rule)\n{(m['change'] or '').strip()}\n"
+        heading = (m["title"] or "").strip() or "(new rule)"
+        block = (f"### {m['new_id']} — {heading}\n{(m['change'] or '').strip()}\n"
                  f"{_format_provenance(prov)}\n\n")
         i = span[1]  # offset of the ARTICLES:END marker line
         return text[:i] + block + text[i:]
@@ -1582,11 +1585,13 @@ def motion_tally(conn, motion_id: int) -> dict:
             "detail": [(s, h, v) for s, (h, v) in last.items()]}
 
 
-def _motion_summary(op, target, new_id, change, because, proposer) -> str:
+def _motion_summary(op, target, new_id, change, because, proposer, title=None) -> str:
     head = {"amend": f"Motion: amend {target}",
             "repeal": f"Motion: repeal {target}",
             "add": f"Motion: add {new_id}"}[op]
     out = f"{head} — proposed by {proposer}. because: {because}"
+    if title and op == "add":
+        out += f"  | title: {title}"
     if change and op != "repeal":
         out += f"  | new text: {change}"
     return out
@@ -1627,6 +1632,22 @@ def cmd_motion(args):
                 print("--change may not contain a '### ' heading, a zone marker, or a "
                       "'<!-- meta:' comment (it would corrupt the law)", file=sys.stderr)
                 return 1
+    # The title becomes a single-line heading (`### <id> — <title>`), so it must be
+    # one safe line — reject newlines and any markup that could break the heading or
+    # forge a second article / zone / provenance comment.
+    title = getattr(args, "title", None)
+    if title is not None:
+        # Reject every char str.splitlines() treats as a line boundary (not just
+        # \n/\r) — VT/FF/FS/GS/RS/NEL/U+2028/U+2029 would render the heading as two
+        # lines in the diff a human reviews even though the file stays one physical line.
+        if any(c in title for c in "\n\r\v\f\x1c\x1d\x1e\x85  "):
+            print("--title must be a single line", file=sys.stderr)
+            return 1
+        if ("###" in title or "CONSTITUTION:" in title
+                or "<!--" in title or "-->" in title):
+            print("--title may not contain '###', a zone marker, or HTML-comment "
+                  "markers (it would corrupt the heading/law)", file=sys.stderr)
+            return 1
     live = {x["id"] for x in parsed["live"]}
     base_text, new_id = None, None
     if op in ("amend", "repeal"):
@@ -1644,15 +1665,17 @@ def cmd_motion(args):
             return 1
         new_id = _next_rule_id(conn, parsed)
     tgt_key = new_id if op == "add" else target
-    summary = _motion_summary(op, target, new_id, change, because, proposer)
+    summary = _motion_summary(op, target, new_id, change, because, proposer,
+                              getattr(args, "title", None))
     mid = send(conn, proposer, summary,
                session_id=(a["session_id"] if a else None), kind="motion")
     conn.execute("UPDATE motions SET status='superseded' WHERE target=? AND status='open'",
                  (tgt_key,))
     conn.execute(
         "INSERT INTO motions(id, ts, proposer, target, op, change, because, "
-        "base_text, new_id, status) VALUES (?,?,?,?,?,?,?,?,?, 'open')",
-        (mid, now_iso(), proposer, tgt_key, op, change, because, base_text, new_id))
+        "base_text, new_id, title, status) VALUES (?,?,?,?,?,?,?,?,?,?, 'open')",
+        (mid, now_iso(), proposer, tgt_key, op, change, because, base_text, new_id,
+         (getattr(args, "title", None) or None)))
     conn.commit()
     print(f"motion M{mid} opened: {op} {tgt_key} (advisory). Teammates vote with "
           f"`vote --session <sid> M{mid} yea|nay`; a human ratifies.")
@@ -1721,6 +1744,8 @@ def cmd_amendments(args):
         flag = ("worth a human's ratify look"
                 if (t["voters"] >= quorum and frac >= superq) else "below the advisory bar")
         print(f"  M{m['id']} [{m['status']}] {m['op']} {m['target']} — by {m['proposer']}")
+        if m["title"]:
+            print(f"      title: {m['title']}")
         print(f"      yea {t['yea']} / nay {t['nay']}  ({t['voters']} registered voters) — {flag}")
         print(f"      because: {(m['because'] or '')[:100]}")
     return 0
@@ -1728,9 +1753,11 @@ def cmd_amendments(args):
 
 def cmd_ratify(args):
     """[human] Default: a READ-ONLY, repeatable evidence dossier + proposed diff
-    (no status change, no announcement). With ``--confirm`` (run AFTER you commit
-    the diff): mark the motion ratified and notify the team. Never writes the file
-    itself — diff-only, C1. The vote is advisory; the human ratifies from evidence."""
+    (no status change, no announcement). With ``--confirm`` (run BEFORE you apply the
+    diff — confirm-then-apply): the applicability guards require the target to be
+    valid, non-colliding, and not-yet-applied, then it marks the motion ratified,
+    prints the diff once more, and notifies the team; you then apply + ``git commit``
+    it. Never writes the file itself — diff-only, C1. The vote is advisory."""
     conn = connect()
     mid = _parse_motion_id(args.motion)
     if mid is None:
@@ -1755,6 +1782,10 @@ def cmd_ratify(args):
     if not parsed["ok"]:
         print("constitution is malformed; fix it before ratifying", file=sys.stderr)
         return 1
+    # Applicability guards run for BOTH the diff preview and --confirm: the target id
+    # must be valid and non-colliding (a taken id / a changed base text is caught
+    # here), and the rule must NOT already be in the file — so --confirm is run BEFORE
+    # the human applies the diff (confirm-then-apply; see the closing guidance).
     if m["op"] in ("amend", "repeal"):
         blk = _article_block(text, m["target"])
         if not blk:
@@ -1774,13 +1805,17 @@ def cmd_ratify(args):
         return 1
 
     if getattr(args, "confirm", False):
+        # Record the human's decision + notify the room ("re-read the law"); the human
+        # then applies + commits the diff (C1, diff-only). The guards above ran first,
+        # so a taken id or a changed base text is still refused.
         conn.execute("UPDATE motions SET status='ratified' WHERE id=?", (mid,))
         send(conn, "system",
              f"Constitution: M{mid} ratified ({m['op']} {m['target']}) — re-read the law.",
              kind="system")
         conn.commit()
         print(f"M{mid} marked ratified and the team notified. "
-              "(Run this only after committing the diff.)")
+              "Apply this diff, then `git commit` it:")
+        print(_unified_diff(text, new_text, path))
         return 0
 
     t = motion_tally(conn, mid)
@@ -1795,8 +1830,9 @@ def cmd_ratify(args):
     print("\n--- proposed diff (apply by hand, then `git commit`) ---")
     diff = _unified_diff(text, new_text, path)
     print(diff if diff.strip() else "(no textual change)")
-    print(f"\nThis view is READ-ONLY and repeatable. After committing the diff, run "
-          f"`ratify --confirm M{mid}` to mark it ratified and notify the team.")
+    print(f"\nThis view is READ-ONLY and repeatable. To enact: run "
+          f"`ratify --confirm M{mid}` (records it + notifies the room), then apply the "
+          f"diff above and `git commit` it.")
     return 0
 
 
@@ -1922,6 +1958,7 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--rule", help="rule id to amend (R<n>), or 'new' to add an Article")
     g.add_argument("--repeal", help="rule id to repeal (R<n>)")
     sp.add_argument("--change", help="proposed new rule text (required for amend/add)")
+    sp.add_argument("--title", help="short heading for a new Article (add only); else a placeholder")
     sp.add_argument("--because", required=True, help="evidence: message ids / tests / diary refs")
     sp.set_defaults(func=cmd_motion)
 
@@ -1938,7 +1975,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("ratify", help="[human] show a motion's evidence + proposed diff (read-only); --confirm to enact")
     sp.add_argument("motion", help="motion id, e.g. M12")
     sp.add_argument("--confirm", action="store_true",
-                    help="after committing the diff: mark ratified + notify the team")
+                    help="mark ratified + notify the team (run BEFORE applying the diff); then apply + git commit")
     sp.set_defaults(func=cmd_ratify)
 
     return p
