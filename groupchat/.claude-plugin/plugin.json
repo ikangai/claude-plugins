@@ -1,6 +1,6 @@
 {
   "name": "groupchat",
   "description": "Shared chat bus for parallel AI coding-agent sessions on one repo — coordinate via hooks, @mentions, a team barrier, a hub-and-spoke lead, cross-CLI bridges, and token tracking.",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "author": { "name": "Martin Treiber", "email": "martin.treiber@gmail.com" }
 }

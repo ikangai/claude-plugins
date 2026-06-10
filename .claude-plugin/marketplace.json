@@ -5,7 +5,7 @@
     {
       "name": "groupchat",
       "source": "./groupchat",
-      "description": "Group chat for parallel Claude Code instances on one repo — coordinate via hooks, @mentions, a team barrier, and token tracking."
+      "description": "Shared chat bus for parallel AI coding-agent sessions on one repo — coordinate via hooks, @mentions, a team barrier, a hub-and-spoke lead, cross-CLI bridges, and token tracking."
     }
   ]
 }

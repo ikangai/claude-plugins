@@ -61,10 +61,21 @@ def _sample_snapshot():
         "refresh": 10,
         "agents": [
             {"handle": "ada", "label": "active", "dot": "green",
-             "cwd": "claude_chat", "age": "3s", "out_display": "1.2k", "out_tokens": 1234},
+             "cwd": "claude_chat", "age": "3s", "out_display": "1.2k", "out_tokens": 1234,
+             "in_tokens": 500, "in_display": "500",
+             "cache_read_tokens": 90000, "cache_read_display": "90k",
+             "cache_create_tokens": 7000, "cache_create_display": "7k"},
             {"handle": "turing", "label": "done · parked", "dot": "blue",
-             "cwd": "claude_chat", "age": "2m", "out_display": "44k", "out_tokens": 44000},
+             "cwd": "claude_chat", "age": "2m", "out_display": "44k", "out_tokens": 44000,
+             "in_tokens": 2000, "in_display": "2k",
+             "cache_read_tokens": 310000, "cache_read_display": "310k",
+             "cache_create_tokens": 12000, "cache_create_display": "12k"},
         ],
+        "token_totals": {
+            "in": 2500, "out": 45234, "cache_read": 400000, "cache_create": 19000,
+            "in_display": "2.5k", "out_display": "45.2k",
+            "cache_read_display": "400k", "cache_create_display": "19k",
+        },
         "messages": [
             {"id": 1, "time": "09:29", "sender": "ada", "mentions": [],
              "kind": "chat", "body": "starting on the bus"},
@@ -195,6 +206,57 @@ def test_collect_escalations_from_helper(c):
                 all(isinstance(e.get("id"), int) for e in esc), esc)
 
 
+def test_render_shows_token_panel(c):
+    """The full chat.py-tokens view (in / out / cache-read / cache-create per
+    agent + totals), not just the roster's out-burn chip."""
+    html = dashboard.render_html(_sample_snapshot())
+    c.check("a tokens panel is rendered", "Tokens" in html or "tokens" in html)
+    c.check("all four counters are labelled",
+            all(k in html.lower() for k in ("in", "out", "cache-read", "cache-create")),
+            "expected in/out/cache-read/cache-create column labels")
+    c.check("per-agent counts are rendered",
+            "90k" in html and "310k" in html and "12k" in html)
+    c.check("a totals row is rendered",
+            "45.2k" in html and "400k" in html and "total" in html.lower())
+    c.check("counts are framed as approximate (transcript-derived)",
+            "approx" in html.lower())
+    # A snapshot without token_totals (older caller) must still render.
+    snap = _sample_snapshot()
+    snap.pop("token_totals")
+    degraded = dashboard.render_html(snap)
+    c.check("missing token_totals degrades, not crashes",
+            degraded.lstrip().lower().startswith("<!doctype html>"))
+
+
+def test_collect_token_totals(c):
+    """collect() carries all four token counters per agent and sums totals."""
+    with tmp_root() as root:
+        init_room(root)
+        conn = db(root)
+        now = dashboard._now_iso()
+        conn.executemany(
+            "INSERT INTO agents(session_id, handle, cwd, status, first_seen, "
+            "last_seen, last_read_id, in_tokens, out_tokens, cache_read_tokens, "
+            "cache_create_tokens) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [("s-ada", "ada", root, None, now, now, 0, 500, 1234, 90000, 7000),
+             ("s-tur", "turing", root, "done", now, now, 0, 2000, 44000, 310000, 12000)],
+        )
+        conn.commit()
+        snap = dashboard.collect(conn)
+        conn.close()
+        by = {a["handle"]: a for a in snap["agents"]}
+        c.check("each agent carries all four counters",
+                by["ada"].get("in_tokens") == 500
+                and by["ada"].get("cache_read_tokens") == 90000
+                and by["turing"].get("cache_create_tokens") == 12000, by)
+        tot = snap.get("token_totals") or {}
+        c.check("totals sum across agents",
+                tot.get("in") == 2500 and tot.get("out") == 45234
+                and tot.get("cache_read") == 400000
+                and tot.get("cache_create") == 19000, tot)
+        c.check("totals carry display strings", bool(tot.get("out_display")), tot)
+
+
 def test_live_mode_autorefreshes(c):
     snap = _sample_snapshot()
     snap["live"] = True
@@ -223,6 +285,8 @@ def test_render_text_is_a_compact_summary(c):
     c.check("text mode shows open escalations",
             "migration" in txt or "escalation" in txt.lower())
     c.check("text mode shows open motions", "M1" in txt and "R2" in txt)
+    c.check("text mode shows the token totals",
+            "45.2k" in txt and "cache" in txt.lower())
     c.check("text mode is plain text, not HTML",
             "<!doctype" not in txt.lower() and "<div" not in txt.lower())
 
@@ -333,6 +397,8 @@ def main():
     test_render_shows_lead(c)
     test_render_shows_escalations(c)
     test_collect_escalations_from_helper(c)
+    test_render_shows_token_panel(c)
+    test_collect_token_totals(c)
     test_live_mode_autorefreshes(c)
     test_render_text_is_a_compact_summary(c)
     test_collect_reads_a_seeded_room(c)

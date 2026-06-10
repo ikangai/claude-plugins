@@ -7,6 +7,8 @@ that a human can open in a browser to watch the whole room at a glance:
 
   * the **roster** — who's active, parked (done but waiting at the barrier), or
     gone, with each agent's output-token burn;
+  * the **tokens** — the full ``chat.py tokens`` view: in / out / cache-read /
+    cache-create per agent plus totals (approximate, transcript-derived);
   * the **conversation** — the recent message feed, with @mentions surfaced and
     system/parliament traffic styled apart;
   * the **parliament** — open motions with their *advisory* tallies;
@@ -124,20 +126,36 @@ def _collect_agents(conn) -> list[dict]:
     for r in rows:
         active = chat._is_active(r["last_seen"])
         label, dot = _status_of(r["status"], active)
-        tokens = r["out_tokens"] if "out_tokens" in r.keys() else 0
-        out.append({
+        cols = r.keys()
+        entry = {
             "handle": r["handle"],
             "label": label,
             "dot": dot,
             "active": active,
             "cwd": os.path.basename((r["cwd"] or "").rstrip("/")) or (r["cwd"] or ""),
             "age": _fmt_age(chat.iso_age_seconds(r["last_seen"])),
-            "out_tokens": tokens,
-            "out_display": _fmt_tokens(tokens),
-        })
+        }
+        # All four transcript counters (a pre-upgrade db may lack the columns).
+        for col in ("in_tokens", "out_tokens", "cache_read_tokens", "cache_create_tokens"):
+            n = int((r[col] if col in cols else 0) or 0)
+            entry[col] = n
+            entry[col.replace("_tokens", "_display")] = _fmt_tokens(n)
+        out.append(entry)
     # Active (incl. parked) first, then by handle — the people in the room float up.
     out.sort(key=lambda a: (not a["active"], a["handle"]))
     return out
+
+
+def _token_totals(agents: list) -> dict:
+    """Sum the four transcript counters across collected agents — the dashboard's
+    mirror of ``chat.py tokens``' total line. Pure (works on collected dicts, no
+    second db read)."""
+    tot = {}
+    for k in ("in", "out", "cache_read", "cache_create"):
+        n = sum(int(a.get(f"{k}_tokens") or 0) for a in (agents or []))
+        tot[k] = n
+        tot[f"{k}_display"] = _fmt_tokens(n)
+    return tot
 
 
 def _collect_messages(conn, limit: int) -> list[dict]:
@@ -273,15 +291,18 @@ def collect(conn, msg_limit: int = DEFAULT_MSG_LIMIT, live: bool = False,
             refresh: int = DEFAULT_REFRESH) -> dict:
     """Read the whole room into a snapshot dict. Pure reads — never mutates. Each
     section degrades independently (see ``_safe``)."""
-    # Lead is resolved first because the escalation queue is scoped to it.
+    # Lead is resolved first because the escalation queue is scoped to it;
+    # agents likewise, because the token totals are summed from them.
     lead = _safe(lambda: _collect_lead(conn), {"handle": None, "source": "flat"})
+    agents = _safe(lambda: _collect_agents(conn), [])
     return {
         "title": "groupchat room",
         "generated_display": _now_display(),
         "room_dir": _safe(chat.store_dir, ""),
         "live": live,
         "refresh": refresh,
-        "agents": _safe(lambda: _collect_agents(conn), []),
+        "agents": agents,
+        "token_totals": _safe(lambda: _token_totals(agents), {}),
         "messages": _safe(lambda: _collect_messages(conn, msg_limit), []),
         "motions": _safe(lambda: _collect_motions(conn), []),
         "barrier": _safe(lambda: _collect_barrier(conn),
@@ -298,7 +319,7 @@ def _empty_snapshot(reason: str, live: bool = False,
     return {
         "title": "groupchat room", "generated_display": _now_display(),
         "room_dir": chat.store_dir(), "live": live, "refresh": refresh,
-        "agents": [], "messages": [], "motions": [],
+        "agents": [], "token_totals": {}, "messages": [], "motions": [],
         "barrier": {"active": 0, "done": 0, "team_done": False,
                     "expected": None, "label": "no agents"},
         "lead": {"handle": None, "source": "flat"}, "escalations": [],
@@ -369,6 +390,14 @@ header .meta{font-family:var(--font-mono);font-size:11px;color:var(--muted);}
 .escal .m-head{font-family:var(--font-mono);font-size:11px;color:#b45309;}
 .escal .body{white-space:pre-wrap;word-break:break-word;font-size:13px;margin-top:2px;}
 .empty{color:var(--faint);font-size:13px;font-style:italic;}
+table.tok{width:100%;border-collapse:collapse;font-family:var(--font-mono);font-size:11px;}
+table.tok th{text-align:right;color:var(--faint);font-weight:500;font-size:9px;
+  letter-spacing:.5px;text-transform:uppercase;padding:2px 0 5px 8px;}
+table.tok td{text-align:right;color:var(--muted);padding:4px 0 4px 8px;
+  border-top:1px solid var(--b1);white-space:nowrap;}
+table.tok th:first-child,table.tok td:first-child{text-align:left;padding-left:0;}
+table.tok td.h{color:var(--text);font-weight:600;font-family:var(--font-ui);font-size:12px;}
+table.tok tr.total td{border-top:1px solid var(--b2);color:var(--text);font-weight:600;}
 footer{margin-top:18px;font-family:var(--font-mono);font-size:10px;color:var(--faint);}
 """
 
@@ -402,6 +431,26 @@ def _render_agents(agents: list) -> str:
             f'</div>'
         )
     return "".join(out)
+
+
+def _render_tokens(agents: list, totals: dict) -> str:
+    """The full ``chat.py tokens`` view: the four transcript counters per agent
+    plus a totals row."""
+    if not agents:
+        return '<div class="empty">no token data yet</div>'
+    totals = totals or {}
+    cells = ("in", "out", "cache_read", "cache_create")
+    head = ('<tr><th>agent</th><th>in</th><th>out</th>'
+            '<th>cache-read</th><th>cache-create</th></tr>')
+    rows = []
+    for a in agents:
+        tds = "".join(f'<td>{_esc(a.get(f"{k}_display", "0"))}</td>' for k in cells)
+        rows.append(f'<tr><td class="h">{_esc(a["handle"])}</td>{tds}</tr>')
+    tds = "".join(f'<td>{_esc(totals.get(f"{k}_display", "0"))}</td>' for k in cells)
+    rows.append(f'<tr class="total"><td>total</td>{tds}</tr>')
+    return (f'<table class="tok">{head}{"".join(rows)}</table>'
+            '<div class="advisory">approximate — summed from each agent\'s local '
+            'transcript; good for relative burn, not billing.</div>')
 
 
 def _render_messages(messages: list) -> str:
@@ -534,6 +583,10 @@ def render_html(snapshot: dict) -> str:
       {_render_agents(s.get("agents", []))}
     </div>
     <div class="card">
+      <h2>Tokens</h2>
+      {_render_tokens(s.get("agents", []), s.get("token_totals", {}))}
+    </div>
+    <div class="card">
       <h2>Team barrier</h2>
       {_render_barrier(s.get("barrier", {}))}
     </div>
@@ -600,6 +653,13 @@ def render_text(snapshot: dict) -> str:
                        f"{a.get('out_display', '')} out · {a.get('age', '')}")
     else:
         out.append("  (no agents)")
+
+    tot = s.get("token_totals") or {}
+    if any(tot.get(k) for k in ("in", "out", "cache_read", "cache_create")):
+        out.append(f"tokens (total): in {tot.get('in_display', '0')} · "
+                   f"out {tot.get('out_display', '0')} · "
+                   f"cache-read {tot.get('cache_read_display', '0')} · "
+                   f"cache-create {tot.get('cache_create_display', '0')} (approx)")
 
     motions = s.get("motions") or []
     if motions:

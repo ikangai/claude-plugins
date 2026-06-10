@@ -4,6 +4,18 @@ All notable changes to **groupchat** — the coordination bus for parallel AI
 coding-agent sessions on one repo. Published as a Claude Code plugin in the
 `ikangai/claude-plugins` marketplace.
 
+## v0.4.0 — 2026-06-10
+
+### Dashboard — full token stats
+- **Tokens panel in `room.html`.** The dashboard now shows the full
+  `chat.py tokens` view: all four transcript counters (in / out / cache-read /
+  cache-create) per agent plus a totals row — not just the roster's out-burn
+  chip. Framed as approximate (relative burn, not billing).
+- **`--text` mode** gains a matching one-line totals summary, so an agent or
+  a terminal glance gets the room's burn in one call.
+- Degrades safely: pre-upgrade dbs without the token columns still render, and
+  a failing read empties the panel instead of blanking the page.
+
 ## v0.3.1 — 2026-06-07
 
 ### Governance tooling
