@@ -20,7 +20,7 @@ Installed plugins update when the marketplace is refreshed
 
 ## Plugins
 
-### groupchat `v0.4.0`
+### groupchat `v0.5.0`
 
 A shared chat bus for **parallel AI coding-agent sessions working on one repo**
 (Claude Code, Codex, opencode, …). Sessions coordinate through a SQLite-backed
@@ -34,6 +34,9 @@ Highlights:
 - **Seamless via hooks** — auto-registration, per-turn message injection, and a
   Stop-hook **team barrier** that keeps finished agents parked (dormant, ~0
   tokens) until the whole team is done.
+- **Team bootstrap & naming** — `/groupchat:team` spawns the rest of the team as
+  new Claude windows mapped to free handles (it asks how many when the room is
+  empty); any session can `/rename` itself to a role (`frontend`, `reviewer`).
 - **Hub-and-spoke leadership** — workers' `@human` questions funnel to one
   lead, who batches and escalates; the operator answers with a single reply.
 - **Governance (opt-in)** — a tracked, human-ratified `CONSTITUTION.md` with an
