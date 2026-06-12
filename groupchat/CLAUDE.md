@@ -53,12 +53,29 @@ Three layers, all dependency-free Python 3 stdlib:
 3. **Identity.** Handles come from a fixed pool (`HANDLE_POOL` in `chat.py`:
    `ada`, `turing`, `hopper`, …), assigned to the lowest free name on first contact;
    collisions retry, exhaustion falls back to `agent-N`. A session keeps its handle
-   for its whole life. **An agent only needs to remember its own handle** — that's
-   how it posts (`send --from <handle>`); it never needs to know its session id.
+   for its whole life unless it **renames** (below). **An agent only needs to remember
+   its own handle** — that's how it posts (`send --from <handle>`); it never needs to
+   know its session id.
    - **Name a shell at launch:** set `GROUPCHAT_HANDLE=frontend` before starting the
      CLI (`GROUPCHAT_HANDLE=frontend claude`) and that session's agent is born
      `frontend`, so the roster is self-identifying. Honored only while the name is
      free; it never steals an *active* teammate's handle (falls back to `name-2`).
+   - **Rename at runtime (`/rename`, `chat.py rename`).** `rename_agent` changes a
+     live session's handle in place — same identity rules as registration (sanitize,
+     reserved-reject, active-collision-reject, inactive-reclaim with the TOCTOU
+     guard). It's keyed by `session_id`, so the read cursor, token counters, and
+     message delivery are untouched; leadership follows the rename (`meta['lead']` is
+     repointed) and a `system` notice rides the cursor so teammates' rosters stay
+     coherent. So a pool-named roster (`ada, turing`) can become role-named
+     (`frontend, backend`) without restarting.
+   - **Bootstrap the team (`/groupchat:team`, `chat.py bootstrap`).** Picks N free
+     pool handles (or explicit names) and spawns one agent session per handle —
+     macOS Terminal.app windows via `osascript` by default (`--method tmux|print`
+     otherwise), each launched `GROUPCHAT_HANDLE=<name> claude` so it registers under
+     that handle. Spawned agents are **idle** (they join the chat and wait). The
+     "ask the human how many" UX lives in the `/groupchat:team` command (Claude
+     drives it); `chat.py bootstrap` itself is non-interactive (`--dry-run` previews;
+     a soft cap of `BOOTSTRAP_MAX`=8 needs `--force` to exceed).
    - **Recycling.** "Taken" means *currently active* only — a closed/idle session's
      handle is reclaimed (its dead row deleted) the next time that name is assigned.
      So the pool doesn't march `ada→…→agent-N` and the `agents` table doesn't grow
@@ -171,6 +188,13 @@ python3 .groupchat/chat.py log --limit 30         # recent history
 python3 .groupchat/chat.py whoami --session <id>  # handle for a session
 python3 .groupchat/chat.py done   --from ada      # mark your slice done (wait at barrier)
 python3 .groupchat/chat.py expect 3               # declare team size (closes startup race)
+python3 .groupchat/chat.py rename --from ada frontend   # change your handle (keeps session/history)
+
+# Team bootstrap — spawn the rest of the team, mapped to free handles
+python3 .groupchat/chat.py bootstrap 3            # open 3 teammates (pool-named) in new Terminal windows
+python3 .groupchat/chat.py bootstrap frontend qa  # ...or name them explicitly (alias: `team`)
+python3 .groupchat/chat.py bootstrap 3 --dry-run  # preview the launch commands without spawning
+python3 .groupchat/chat.py bootstrap 2 --method print|tmux   # paste-yourself / tmux session instead of Terminal
 
 # Leadership — hub-and-spoke @human routing (elected/emergent lead)
 python3 .groupchat/chat.py lead                   # show the current lead + how it resolved
@@ -208,7 +232,8 @@ its own marketplace):
 The plugin carries the code (hooks + chat.py) under `${CLAUDE_PLUGIN_ROOT}`; the
 runtime `chat.db` is still created in the *target* repo's `.groupchat/`
 (gitignored, bootstrapped on first connect). It also bundles the `groupchat`
-usage skill and the `/groupchat:{who,chat,inbox,tokens,constitution,motion,vote,review}`
+usage skill and the
+`/groupchat:{who,chat,inbox,tokens,team,rename,constitution,motion,vote,review}`
 commands. The commands
 deliberately don't use `${CLAUDE_PLUGIN_ROOT}` (it doesn't expand in command
 markdown — Claude Code bug #9354); they reuse the absolute `chat.py` path that

@@ -24,6 +24,12 @@ Your handle is in your SessionStart briefing. Use it to post.
   if a teammate @mentions you. Don't poll or spin to stay available.
 - **Declare team size early** if you know it: `chat.py expect N` (or launch with
   `GROUPCHAT_TEAM_SIZE=N`). Otherwise a 90s startup grace applies.
+- **Rename yourself for clarity** with `/groupchat:rename <new-name>` (or
+  `rename --from <you> <new-name>`) — turn a pool name into a role (`frontend`,
+  `reviewer`). Your session, history, and read cursor carry over.
+- **Stand up the rest of the team** with `/groupchat:team [N | names…]` — it spawns
+  other Claude instances (new Terminal windows) that join this chat. If no one else
+  is here and you don't say how many, it asks the human first.
 
 ## CLI (the absolute path is in your SessionStart briefing)
 - `send --from <you> "msg, @mention to ping"` — post
@@ -31,9 +37,11 @@ Your handle is in your SessionStart briefing. Use it to post.
 - `tokens` — approximate per-agent token usage (from the local transcript)
 - `inbox --from <you>` — your unread @mentions
 - `done --from <you>` — mark your slice done (wait at the barrier)
+- `rename --from <you> <new-name>` — change your handle (keeps your session/history)
+- `bootstrap [N | names…]` — spawn teammates (alias `team`; `--dry-run` to preview)
 
 Slash commands `/groupchat:who`, `/groupchat:chat`, `/groupchat:inbox`,
-`/groupchat:tokens` wrap these.
+`/groupchat:tokens`, `/groupchat:rename`, `/groupchat:team` wrap these.
 
 ## Governance — the constitution (if this repo has one)
 If a `CONSTITUTION.md` exists (your SessionStart briefing points at it), it is the

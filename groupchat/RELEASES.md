@@ -4,6 +4,31 @@ All notable changes to **groupchat** — the coordination bus for parallel AI
 coding-agent sessions on one repo. Published as a Claude Code plugin in the
 `ikangai/claude-plugins` marketplace.
 
+## v0.5.0 — 2026-06-12
+
+### Team bootstrap — spawn the rest of the team in one command
+- **`chat.py bootstrap [N | names…]`** (slash command **`/groupchat:team`**, alias
+  `team`). Picks N free team-member handles (or your explicit names, collision-
+  suffixed) and opens one agent session per handle — **macOS Terminal.app windows**
+  by default (`--method tmux|print` otherwise), each launched
+  `GROUPCHAT_HANDLE=<name> claude` so it registers under that handle and appears in
+  `who`. Spawned agents are **idle**: they join the chat and wait for direction.
+- **"How many?" asks you.** The `/groupchat:team` command checks `who`; if the room
+  is empty and you didn't say how many, it asks first — then bootstraps. The CLI
+  itself stays non-interactive: `--dry-run` previews the exact launch commands and a
+  soft cap (`BOOTSTRAP_MAX`=8) needs `--force` to exceed, so a fat-fingered count
+  can't open a swarm of windows.
+
+### Rename — change your handle at runtime
+- **`chat.py rename --from <you> <new>`** (slash command **`/groupchat:rename`**).
+  Turn a pool name into a role (`ada → frontend`) without restarting. Same identity
+  rules as registration — sanitized, reserved-rejecting, active-collision-rejecting,
+  inactive-reclaiming (TOCTOU-guarded). Keyed by `session_id`, so the **read cursor,
+  token counters, and message delivery survive untouched**; **leadership follows**
+  the rename (`meta['lead']` is repointed) and a `system` notice rides the cursor so
+  teammates' rosters stay coherent.
+- The SessionStart briefing now advertises `rename`, so agents discover it.
+
 ## v0.4.0 — 2026-06-10
 
 ### Dashboard — full token stats

@@ -26,6 +26,8 @@ import argparse
 import json
 import os
 import re
+import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -471,6 +473,68 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
     raise RuntimeError("could not assign a unique handle")
 
 
+def rename_agent(conn: sqlite3.Connection, session_id: str,
+                 new_handle: str) -> tuple[str, str]:
+    """Change ``session_id``'s handle to ``new_handle`` in place; return (old, new).
+
+    Mirrors register()'s identity rules so a rename can't break the handle
+    invariants: sanitized, reserved-rejecting, and collision-safe — an *active*
+    holder blocks the rename (the caller picks another name), while an *inactive*
+    holder is reclaimed with the same TOCTOU-guarded delete register() uses. The
+    agents table is keyed by session_id and every hook reads/advances the cursor by
+    session_id, so the read cursor, token counters, and message delivery all survive
+    the handle change untouched. Raises ValueError on an empty/reserved/taken target.
+    """
+    agent = agent_by_session(conn, session_id)
+    if not agent:
+        raise ValueError("no such session — register before renaming")
+    old = agent["handle"]
+    new = re.sub(r"[^a-z0-9_-]", "", (new_handle or "").lower())
+    if not new:
+        raise ValueError("handle must contain a-z, 0-9, '-' or '_'")
+    if new == old:
+        return (old, old)  # idempotent: renaming to your own name is a no-op
+    if new in RESERVED_HANDLES:
+        raise ValueError(f"'{new}' is reserved and cannot be a handle")
+
+    holder = agent_by_handle(conn, new)
+    if holder and holder["session_id"] != session_id:
+        if _is_active(holder["last_seen"]):
+            raise ValueError(f"handle '{new}' is in use by an active agent")
+        # Inactive holder: reclaim the dead row, re-asserting staleness IN the
+        # DELETE so a holder that revived mid-reclaim keeps its name — the UPDATE
+        # below then collides on the UNIQUE handle and we surface a clean error.
+        cutoff = datetime.fromtimestamp(
+            _now_epoch() - ACTIVE_WINDOW_SECONDS, timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        conn.execute(
+            "DELETE FROM agents WHERE session_id = ? AND (last_seen IS NULL OR last_seen < ?)",
+            (holder["session_id"], cutoff),
+        )
+
+    try:
+        conn.execute(
+            "UPDATE agents SET handle = ?, last_seen = ? WHERE session_id = ?",
+            (new, now_iso(), session_id),
+        )
+    except sqlite3.IntegrityError:
+        raise ValueError(f"handle '{new}' was just taken — try another")
+    # Leadership follows the rename: meta['lead'] stores a handle, so without this a
+    # renamed lead would orphan the pointer until the floor re-elected.
+    if (get_meta(conn, "lead") or "").strip().lower() == old.lower():
+        set_meta(conn, "lead", new)
+    conn.commit()
+    # Let teammates learn the rename through the normal cursor. kind='system'
+    # carries no @mentions, so it neither blocks a Stop nor gates the team barrier;
+    # best-effort — the rename already succeeded if the notice fails.
+    try:
+        send(conn, new, f"renamed: {old} → {new}", session_id=session_id,
+             kind="system")
+    except Exception:
+        pass
+    return (old, new)
+
+
 def agent_by_session(conn, session_id: str):
     return conn.execute(
         "SELECT * FROM agents WHERE session_id = ?", (session_id,)
@@ -496,6 +560,121 @@ def resolve_agent(conn, session_id: str | None, handle: str | None):
 def active_agents(conn) -> list[sqlite3.Row]:
     rows = conn.execute("SELECT * FROM agents ORDER BY handle").fetchall()
     return [r for r in rows if _is_active(r["last_seen"])]
+
+
+# --------------------------------------------------------------------------- #
+# Team bootstrap — spawn other agent sessions, mapped to free handles
+# --------------------------------------------------------------------------- #
+# Open the rest of the team in one command: pick free team-member handles and
+# launch a Claude (or any host) session per handle, each born with its name via
+# GROUPCHAT_HANDLE. Dormant until used — nothing here runs unless `bootstrap` is
+# called, so a repo that never bootstraps behaves exactly as before.
+BOOTSTRAP_MAX = 8  # soft cap so a fat-fingered count can't open a swarm of windows
+
+
+def _pick_free_handles(conn, n: int, explicit: list[str] | None = None) -> list[str]:
+    """Choose handles for ``n`` agents-to-be, none colliding with an active
+    teammate, a reserved name, or each other. With ``explicit`` names, sanitize and
+    collision-suffix each (so `ada` becomes `ada-2` when `ada` is active); otherwise
+    walk HANDLE_POOL then fall back to agent-N. The names are not registered here —
+    each spawned session claims its own via GROUPCHAT_HANDLE when it starts."""
+    taken = {a["handle"] for a in active_agents(conn)} | set(RESERVED_HANDLES)
+    picked: list[str] = []
+    if explicit:
+        for raw in explicit:
+            cand = re.sub(r"[^a-z0-9_-]", "", (raw or "").lower()) or "agent"
+            if cand in taken:
+                i = 2
+                while f"{cand}-{i}" in taken:
+                    i += 1
+                cand = f"{cand}-{i}"
+            taken.add(cand)
+            picked.append(cand)
+        return picked
+    for h in HANDLE_POOL:
+        if len(picked) >= n:
+            break
+        if h not in taken:
+            taken.add(h)
+            picked.append(h)
+    i = 1
+    while len(picked) < n:
+        cand = f"agent-{i}"
+        if cand not in taken:
+            taken.add(cand)
+            picked.append(cand)
+        i += 1
+    return picked
+
+
+def _default_spawn_method() -> str:
+    """Terminal.app on macOS; elsewhere fall back to printing the commands."""
+    return "terminal" if sys.platform == "darwin" else "print"
+
+
+def _spawn_command(name: str, cwd: str, prompt: str | None) -> str:
+    """The shell command a spawned session runs: cd into the repo and launch claude
+    with its handle pre-set, so its SessionStart hook registers it under ``name``."""
+    claude = shutil.which("claude") or "claude"
+    cmd = f"cd {shlex.quote(cwd)} && GROUPCHAT_HANDLE={name} {shlex.quote(claude)}"
+    if prompt:
+        cmd += " " + shlex.quote(prompt)
+    return cmd
+
+
+def _applescript_escape(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def spawn_agents(names, cwd: str, method: str = "terminal",
+                 prompt: str | None = None, dry_run: bool = False) -> list[dict]:
+    """Open one agent session per handle in ``names``. Returns a per-name result
+    list of dicts {name, command, ok, error}. ``dry_run`` (or method='print')
+    spawns nothing and just reports the runnable commands."""
+    results: list[dict] = []
+    tmux_started = False
+    for name in names:
+        cmd = _spawn_command(name, cwd, prompt)
+        rec = {"name": name, "command": cmd, "ok": False, "error": None}
+        if dry_run or method == "print":
+            rec["ok"] = True  # nothing to launch; the command line is the deliverable
+            results.append(rec)
+            continue
+        try:
+            if method == "terminal":
+                if sys.platform != "darwin":
+                    raise RuntimeError("terminal method needs macOS; use --method print")
+                script = ('tell application "Terminal" to do script '
+                          f'"{_applescript_escape(cmd)}"')
+                subprocess.run(["osascript", "-e", script], check=True,
+                               capture_output=True, text=True)
+                rec["ok"] = True
+            elif method == "tmux":
+                if not shutil.which("tmux"):
+                    raise RuntimeError("tmux not found; use --method terminal or print")
+                tmux_args = (["new-session", "-d", "-s", "groupchat", "-n", name, cmd]
+                             if not tmux_started
+                             else ["new-window", "-t", "groupchat", "-n", name, cmd])
+                subprocess.run(["tmux", *tmux_args], check=True,
+                               capture_output=True, text=True)
+                tmux_started = True
+                rec["ok"] = True
+            else:
+                raise RuntimeError(f"unknown spawn method '{method}'")
+        except Exception as e:
+            detail = getattr(e, "stderr", None) or str(e)
+            rec["error"] = (detail.strip() if isinstance(detail, str) and detail
+                            else str(e))
+        results.append(rec)
+    # Bring Terminal forward once if anything opened (best-effort cosmetic).
+    if method == "terminal" and not dry_run and any(r["ok"] for r in results):
+        try:
+            subprocess.run(["osascript", "-e",
+                            'tell application "Terminal" to activate'],
+                           check=False, capture_output=True, text=True)
+        except Exception:
+            pass
+    return results
 
 
 def set_status(conn, session_id: str, status: str) -> None:
@@ -1147,6 +1326,81 @@ def cmd_expect(args):
         print(f"expected team size set to {args.n}")
     conn.close()
     return 0
+
+
+def cmd_rename(args):
+    """Change your handle in place — keeps your session, history, and read cursor."""
+    conn = connect()
+    a = _resolve_for_cli(conn, args)
+    if not a:
+        print("(no agent identity; pass --from <current-handle> or --session)",
+              file=sys.stderr)
+        conn.close()
+        return 1
+    try:
+        old, new = rename_agent(conn, a["session_id"], args.new)
+    except ValueError as e:
+        print(f"rename failed: {e}", file=sys.stderr)
+        conn.close()
+        return 1
+    if old == new:
+        print(f"already named {new} (no change)")
+    else:
+        print(f"renamed: {old} → {new}\n"
+              f"Post as `--from {new}` from now on (your session keeps its history).")
+    conn.close()
+    return 0
+
+
+def cmd_bootstrap(args):
+    """Spawn other agent sessions and map them to free team-member handles. The
+    'ask the human how many' UX lives in the /groupchat:team command (Claude-driven);
+    this CLI just resolves names and launches."""
+    conn = connect()
+    specs = args.spec or []
+    method = args.method or _default_spawn_method()
+    cwd = args.cwd or os.getcwd()
+    if len(specs) == 1 and specs[0].isdigit():
+        count = int(specs[0])
+        if count < 1:
+            print("count must be ≥ 1", file=sys.stderr)
+            conn.close()
+            return 1
+        names = _pick_free_handles(conn, count)
+    elif specs:
+        names = _pick_free_handles(conn, len(specs), explicit=specs)
+    else:
+        print("specify how many teammates (e.g. `bootstrap 3`) or their names "
+              "(e.g. `bootstrap frontend backend`).", file=sys.stderr)
+        conn.close()
+        return 1
+    if len(names) > BOOTSTRAP_MAX and not args.force:
+        print(f"refusing to spawn {len(names)} agents (cap {BOOTSTRAP_MAX}); "
+              f"pass --force to override.", file=sys.stderr)
+        conn.close()
+        return 1
+    conn.close()
+
+    results = spawn_agents(names, cwd, method=method, prompt=args.prompt,
+                           dry_run=args.dry_run)
+    only_printing = args.dry_run or method == "print"
+    verb = "would spawn" if only_printing else "spawned"
+    ok = sum(1 for r in results if r["ok"])
+    print(f"{verb} {ok}/{len(results)} teammate(s) via {method} in {cwd}:")
+    for r in results:
+        print(f"  {'✓' if r['ok'] else '✗'} {r['name']}")
+        if r["error"]:
+            print(f"      error: {r['error']}")
+    if only_printing:
+        print("\nRun each in its own terminal:")
+        for r in results:
+            print(f"  {r['command']}")
+    elif method == "tmux" and ok:
+        print("\nAttach with:  tmux attach -t groupchat")
+    elif method == "terminal" and ok:
+        print("\nEach opened in a new Terminal window — they'll join the chat. "
+              "`who` to confirm; tell each what to do, or `/rename` to relabel.")
+    return 0 if all(r["ok"] for r in results) else 1
 
 
 # Hook wiring appended to a target repo's .claude/settings.json by `install`.
@@ -1932,6 +2186,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("expect", help="declare/show the expected number of agents this run")
     sp.add_argument("n", nargs="?", type=int, help="expected agent count (omit to show)")
     sp.set_defaults(func=cmd_expect)
+
+    sp = sub.add_parser("rename", help="change your handle (keeps your session/history)")
+    add_identity(sp)
+    sp.add_argument("new", help="your new handle (a-z, 0-9, '-', '_')")
+    sp.set_defaults(func=cmd_rename)
+
+    sp = sub.add_parser("bootstrap", aliases=["team"],
+                        help="spawn other Claude instances as named teammates")
+    sp.add_argument("spec", nargs="*",
+                    help="a count (e.g. 3) or explicit names (e.g. frontend backend)")
+    sp.add_argument("--method", choices=["terminal", "tmux", "print"],
+                    help="how to launch (default: terminal on macOS, else print)")
+    sp.add_argument("--cwd", help="working dir for spawned agents (default: cwd)")
+    sp.add_argument("--prompt", help="initial prompt for each agent (default: none/idle)")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="print the launch commands without spawning")
+    sp.add_argument("--force", action="store_true",
+                    help=f"allow spawning more than {BOOTSTRAP_MAX} at once")
+    sp.set_defaults(func=cmd_bootstrap)
 
     sp = sub.add_parser("install", help="install group chat into a target repo")
     sp.add_argument("target", nargs="?", default=".", help="target repo root (default: cwd)")

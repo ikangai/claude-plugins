@@ -59,6 +59,8 @@ def main():
         'the lead (the fleet\'s single point of contact)',
         f'Lead:    python3 "{path}" lead   '
         '(show the lead; `lead --claim` to take it, `lead <h>` to hand off)',
+        f'Rename:  python3 "{path}" rename --from {handle} <new-name>   '
+        '(change your handle; keeps your history)',
     ]
     if recent:
         lines += ["", "Recent chat:", chat.format_messages(recent, highlight=handle)]

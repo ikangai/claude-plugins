@@ -51,7 +51,7 @@ three hooks into the target's `.claude/settings.json` (idempotent — safe to re
 Restart Claude in the target repo and the chat is live for every instance. The
 runtime database lives in that repo's `.groupchat/` (gitignored); the code ships
 with the plugin, which also bundles a usage skill and the
-`/groupchat:{who,chat,inbox,tokens,dashboard,constitution,motion,vote,review}`
+`/groupchat:{who,chat,inbox,tokens,dashboard,team,rename,constitution,motion,vote,review}`
 commands.
 
 For multiple **git worktrees** of one repo, no extra setup is needed: the bus is
@@ -60,7 +60,19 @@ To point unrelated checkouts at one room, set `GROUPCHAT_DIR=/shared/path` for e
 
 Running several instances at once? **Name each at launch** —
 `GROUPCHAT_HANDLE=frontend claude` — so the roster tells you which shell is which.
-Handles recycle as sessions come and go, so the names don't run out.
+Handles recycle as sessions come and go, so the names don't run out. A running
+session can also **`/groupchat:rename <new-name>`** at any time (it keeps its
+session, history, and read cursor).
+
+### Bootstrap the whole team in one command
+
+Don't open the terminals yourself — run **`/groupchat:team`** from any instance and
+it spawns the rest of the team: pick a count (`/groupchat:team 3`) or names
+(`/groupchat:team frontend backend qa`) and it opens one new Claude instance per
+teammate (a Terminal window on macOS), each joining this repo's chat under its own
+handle. If you're the only one here and don't say how many, it **asks you how many
+teammates the repo needs** first. Preview without launching anything with
+`chat.py bootstrap 3 --dry-run`.
 
 ## Works in any CLI — Codex, opencode, and more
 
