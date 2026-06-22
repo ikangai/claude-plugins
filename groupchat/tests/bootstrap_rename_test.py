@@ -184,12 +184,201 @@ def test_bootstrap_cap():
         check("`team` aliases `bootstrap`", "would spawn 2/2" in r.stdout, r.stdout + r.stderr)
 
 
+def test_bootstrap_declares_team_size():
+    print("bootstrap declares team size (gate + env override):")
+    import argparse
+    import contextlib
+    import io
+    sys.path.insert(0, os.path.join(ROOT, ".groupchat"))
+    import chat  # noqa: E402
+
+    def _ns(**kw):
+        base = dict(spec=None, method="terminal", cwd="/x", prompt=None,
+                    dry_run=False, worktree=False, force=False)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    # Stub the launcher so nothing real spawns but ok>0 (as a real terminal would),
+    # and the join-poll so it returns instantly instead of waiting ~5s for the
+    # never-launched phantom agents to register.
+    orig, orig_poll = chat.spawn_agents, chat.poll_joined
+    chat.spawn_agents = lambda names, cwd, **kw: [
+        {"name": n, "command": "c", "ok": True, "error": None} for n in names]
+    chat.poll_joined = lambda conn, names, **kw: {n: True for n in names}
+    try:
+        def _seed(root):
+            os.environ["GROUPCHAT_DIR"] = os.path.join(root, ".groupchat")
+            os.environ.pop("GROUPCHAT_TEAM_SIZE", None)
+            conn = chat.connect()
+            chat.register(conn, "sb", handle="boss")
+            conn.close()
+
+        def _bootstrap(**ns):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                chat.cmd_bootstrap(_ns(**ns))
+            return buf.getvalue()
+
+        with tempfile.TemporaryDirectory() as root:
+            _seed(root)
+            _bootstrap(spec=["2"], method="terminal")
+            conn = chat.connect(); size = chat.expected_team_size(conn); conn.close()
+            check("a real spawn declares size = active + spawned", size == 3, str(size))
+
+        with tempfile.TemporaryDirectory() as root:
+            _seed(root)
+            _bootstrap(spec=["2"], method="print")
+            conn = chat.connect(); size = chat.expected_team_size(conn); conn.close()
+            check("--method print declares no team size (preview only)",
+                  size is None, str(size))
+
+        with tempfile.TemporaryDirectory() as root:
+            _seed(root)
+            _bootstrap(spec=["2"], dry_run=True)
+            conn = chat.connect(); size = chat.expected_team_size(conn); conn.close()
+            check("--dry-run declares no team size", size is None, str(size))
+
+        with tempfile.TemporaryDirectory() as root:
+            _seed(root)
+            os.environ["GROUPCHAT_TEAM_SIZE"] = "9"
+            out = _bootstrap(spec=["2"], method="terminal")
+            check("warns when $GROUPCHAT_TEAM_SIZE overrides the declared size",
+                  "overrides" in out and "9" in out, out)
+    finally:
+        chat.spawn_agents = orig
+        chat.poll_joined = orig_poll
+        os.environ.pop("GROUPCHAT_TEAM_SIZE", None)
+        os.environ.pop("GROUPCHAT_DIR", None)
+
+
+def test_poll_joined():
+    print("bootstrap join poll:")
+    sys.path.insert(0, os.path.join(ROOT, ".groupchat"))
+    import chat  # noqa: E402
+    with tempfile.TemporaryDirectory() as root:
+        os.environ["GROUPCHAT_DIR"] = os.path.join(root, ".groupchat")
+        try:
+            conn = chat.connect()
+            chat.register(conn, "s_here", handle="here")
+            joined = chat.poll_joined(conn, ["here", "missing"], timeout=0.5, tick=0.1)
+            check("an already-registered teammate reports joined",
+                  joined.get("here") is True, str(joined))
+            check("a teammate that never registers reports not-yet",
+                  joined.get("missing") is False, str(joined))
+            conn.close()
+        finally:
+            os.environ.pop("GROUPCHAT_DIR", None)
+
+
+def test_bootstrap_worktree_dry_run():
+    print("bootstrap --worktree (dry-run — nothing launches):")
+    with tempfile.TemporaryDirectory() as root:
+        env = env_for(root)
+        run(["init"], env)
+        r = run(["bootstrap", "2", "--worktree", "--dry-run",
+                 "--cwd", "/repo/proj"], env)
+        check("emits a `git worktree add` per agent",
+              r.stdout.count("worktree add") == 2, r.stdout)
+        check("creates a groupchat/<name> branch per agent",
+              "groupchat/ada" in r.stdout and "groupchat/turing" in r.stdout, r.stdout)
+        check("each agent launches cd'd into its own worktree dir",
+              "proj-worktrees" in r.stdout, r.stdout)
+        check("still emits a GROUPCHAT_HANDLE launch per agent",
+              r.stdout.count("GROUPCHAT_HANDLE=") == 2, r.stdout)
+
+
+def test_worktree_creation_isolates_files():
+    print("bootstrap --worktree (real git isolation):")
+    import subprocess as sp
+    sys.path.insert(0, os.path.join(ROOT, ".groupchat"))
+    import chat  # noqa: E402
+    with tempfile.TemporaryDirectory() as root:
+        repo = os.path.join(root, "proj")
+        os.makedirs(repo)
+        sp.run(["git", "init", "-q", repo], check=True)
+        sp.run(["git", "-C", repo, "config", "user.email", "t@t"], check=True)
+        sp.run(["git", "-C", repo, "config", "user.name", "t"], check=True)
+        with open(os.path.join(repo, "f.txt"), "w") as fh:
+            fh.write("main\n")
+        sp.run(["git", "-C", repo, "add", "-A"], check=True)
+        sp.run(["git", "-C", repo, "commit", "-q", "-m", "init"], check=True)
+
+        wt = chat._worktree_path(repo, "ada")
+        err = chat._create_worktree(repo, wt, "ada")
+        check("worktree created without error", err is None, str(err))
+        check("worktree dir exists", os.path.isdir(wt))
+
+        with open(os.path.join(wt, "f.txt"), "w") as fh:
+            fh.write("changed-by-ada\n")
+        with open(os.path.join(repo, "f.txt")) as fh:
+            main_contents = fh.read()
+        check("the main working tree is unaffected by a worktree edit",
+              main_contents == "main\n", main_contents)
+
+        br = sp.run(["git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True).stdout.strip()
+        check("the worktree is on its own groupchat/<name> branch",
+              br == "groupchat/ada", br)
+
+
+def test_worktree_no_stale_branch_reuse():
+    print("bootstrap --worktree (no stale-branch reuse):")
+    import subprocess as sp
+    sys.path.insert(0, os.path.join(ROOT, ".groupchat"))
+    import chat  # noqa: E402
+    with tempfile.TemporaryDirectory() as root:
+        repo = os.path.join(root, "proj")
+        os.makedirs(repo)
+        sp.run(["git", "init", "-q", repo], check=True)
+        sp.run(["git", "-C", repo, "config", "user.email", "t@t"], check=True)
+        sp.run(["git", "-C", repo, "config", "user.name", "t"], check=True)
+        with open(os.path.join(repo, "f.txt"), "w") as fh:
+            fh.write("c1\n")
+        sp.run(["git", "-C", repo, "add", "-A"], check=True)
+        sp.run(["git", "-C", repo, "commit", "-qm", "c1"], check=True)
+
+        wt1 = chat._worktree_path(repo, "ada")
+        check("first worktree created", chat._create_worktree(repo, wt1, "ada") is None)
+        # The worktree departs (dir removed) but branch groupchat/ada lingers at c1.
+        sp.run(["git", "-C", repo, "worktree", "remove", wt1, "--force"], check=True)
+        with open(os.path.join(repo, "f.txt"), "w") as fh:
+            fh.write("c2\n")  # main advances; the lingering branch is now a stale base
+        sp.run(["git", "-C", repo, "commit", "-aqm", "c2"], check=True)
+
+        wt2 = os.path.join(root, "proj-worktrees-2", "ada")
+        err = chat._create_worktree(repo, wt2, "ada")
+        check("re-bootstrap does NOT silently reuse a stale branch (reports instead)",
+              err is not None, str(err))
+
+
+def test_worktree_failure_skips_agent():
+    print("bootstrap --worktree (failure reported, agent skipped):")
+    sys.path.insert(0, os.path.join(ROOT, ".groupchat"))
+    import chat  # noqa: E402
+    with tempfile.TemporaryDirectory() as root:
+        nongit = os.path.join(root, "plain")
+        os.makedirs(nongit)
+        res = chat.spawn_agents(["ada"], cwd=nongit, method="terminal", worktree=True)
+        check("a failed worktree skips the agent (never silent shared-cwd fallback)",
+              bool(res) and res[0]["ok"] is False, str(res))
+        check("...and reports the git error", bool(res[0]["error"]), str(res))
+        check("...and leaves no empty worktree dir behind",
+              not os.path.isdir(os.path.join(root, "plain-worktrees")),
+              os.listdir(root))
+
+
 def main():
     test_rename()
     test_active_collision_and_reclaim()
     test_lead_and_cursor_follow()
     test_bootstrap_dry_run()
     test_bootstrap_cap()
+    test_bootstrap_declares_team_size()
+    test_poll_joined()
+    test_bootstrap_worktree_dry_run()
+    test_worktree_creation_isolates_files()
+    test_worktree_no_stale_branch_reuse()
+    test_worktree_failure_skips_agent()
     print()
     if _failures:
         print(f"FAILED ({len(_failures)}): " + ", ".join(_failures))

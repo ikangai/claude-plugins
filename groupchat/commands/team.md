@@ -24,6 +24,10 @@ Do this:
 
    Add `--dry-run` first if I want to preview the exact launch commands without
    opening anything, or `--method print` to just get commands to paste myself.
+   Add `--worktree` if the teammates will edit code in parallel — each gets its own
+   git worktree (branch `groupchat/<name>`) so their edits can't collide, while one
+   shared chat keeps them coordinating. Bootstrap records the team size so the
+   barrier is precise and nobody waits on a teammate who never came.
 4. Report the spawned roster. Tell me the new Terminal windows **are** my
    teammates — I can switch to any of them and start giving instructions, and each
    can `/rename` itself to something meaningful (e.g. `frontend`, `reviewer`).

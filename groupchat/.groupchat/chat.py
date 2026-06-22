@@ -69,6 +69,11 @@ DONE_STATUS = "done"
 STARTUP_GRACE_SECONDS = 90        # how long to wait for a staggered launch when
                                   # the team size is unknown (no GROUPCHAT_TEAM_SIZE
                                   # / `expect`), before the barrier may complete
+SOLO_GRACE_SECONDS = 10           # a lone, undeclared agent only settles this long
+                                  # (catch a co-launched teammate a beat behind
+                                  # registering) before the barrier may complete — so
+                                  # "working solo" never means waiting 90s for nobody.
+                                  # Override with GROUPCHAT_SOLO_GRACE (0 = no wait).
 MAX_PARK_SECONDS = 2 * 60 * 60    # ceiling: release a parked agent after this much
                                   # continuous waiting regardless of the barrier,
                                   # so a mis-set team size can't hang everyone forever.
@@ -466,6 +471,7 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
                 (session_id, h, cwd, pid, status, ts, ts),
             )
             conn.commit()
+            _clear_stale_team_size(conn, session_id)
             return h
         except sqlite3.IntegrityError:
             handle = None  # collided; let the pool pick the next free one
@@ -626,35 +632,85 @@ def _applescript_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _worktree_path(cwd: str, name: str) -> str:
+    """Where a spawned agent's isolated worktree lives: a sibling of the repo dir,
+    ``<repo>-worktrees/<name>`` — outside the working tree so it doesn't clutter
+    git status, and parallel to it so it's easy to find."""
+    base = os.path.abspath(cwd)
+    return os.path.join(os.path.dirname(base),
+                        os.path.basename(base) + "-worktrees", name)
+
+
+def _worktree_add_argv(repo_cwd: str, path: str, name: str) -> list[str]:
+    return ["git", "-C", repo_cwd, "worktree", "add", path, "-b", f"groupchat/{name}"]
+
+
+def _create_worktree(repo_cwd: str, path: str, name: str) -> str | None:
+    """Create a git worktree at ``path`` on a fresh branch ``groupchat/<name>`` (from
+    the current HEAD) in the repo containing ``repo_cwd``. Returns None on success,
+    else an error string. ``git worktree add`` makes the parent dirs itself, so a
+    failure leaves nothing behind. There is deliberately NO fallback to checking out
+    an *existing* ``groupchat/<name>`` branch: a left-over branch from a prior run
+    would start the agent on a STALE base. On a name collision we report the error and
+    let the caller skip — the human clears the old worktree/branch and retries
+    (`git worktree remove …` / `git branch -D groupchat/<name>`)."""
+    r = subprocess.run(_worktree_add_argv(repo_cwd, path, name),
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        return None
+    return (r.stderr or "").strip() or "git worktree add failed"
+
+
 def spawn_agents(names, cwd: str, method: str = "terminal",
-                 prompt: str | None = None, dry_run: bool = False) -> list[dict]:
+                 prompt: str | None = None, dry_run: bool = False,
+                 worktree: bool = False) -> list[dict]:
     """Open one agent session per handle in ``names``. Returns a per-name result
     list of dicts {name, command, ok, error}. ``dry_run`` (or method='print')
-    spawns nothing and just reports the runnable commands."""
+    spawns nothing and just reports the runnable commands. With ``worktree=True``
+    each agent gets its own git worktree (branch ``groupchat/<name>``) so their file
+    edits can't collide; the shared chat.db (anchored at the git common dir) keeps
+    them in one room."""
     results: list[dict] = []
     tmux_started = False
     for name in names:
-        cmd = _spawn_command(name, cwd, prompt)
-        rec = {"name": name, "command": cmd, "ok": False, "error": None}
+        launch_dir = _worktree_path(cwd, name) if worktree else cwd
+        launch_cmd = _spawn_command(name, launch_dir, prompt)
+        # The reproducible one-liner shown to a human (print/dry-run) must also
+        # create the worktree; the real-launch path makes it via subprocess first,
+        # then runs only launch_cmd (re-running `git worktree add` would fail the
+        # &&-chain and stop `claude` from starting).
+        if worktree:
+            add = " ".join(shlex.quote(x)
+                           for x in _worktree_add_argv(cwd, launch_dir, name))
+            display_cmd = add + " && " + launch_cmd
+        else:
+            display_cmd = launch_cmd
+        rec = {"name": name, "command": display_cmd, "ok": False, "error": None}
         if dry_run or method == "print":
             rec["ok"] = True  # nothing to launch; the command line is the deliverable
             results.append(rec)
             continue
         try:
+            if worktree:
+                err = _create_worktree(cwd, launch_dir, name)
+                if err:
+                    # Don't silently fall back to the shared cwd — isolation was the
+                    # whole point; report and skip this one.
+                    raise RuntimeError(f"git worktree add failed: {err}")
             if method == "terminal":
                 if sys.platform != "darwin":
                     raise RuntimeError("terminal method needs macOS; use --method print")
                 script = ('tell application "Terminal" to do script '
-                          f'"{_applescript_escape(cmd)}"')
+                          f'"{_applescript_escape(launch_cmd)}"')
                 subprocess.run(["osascript", "-e", script], check=True,
                                capture_output=True, text=True)
                 rec["ok"] = True
             elif method == "tmux":
                 if not shutil.which("tmux"):
                     raise RuntimeError("tmux not found; use --method terminal or print")
-                tmux_args = (["new-session", "-d", "-s", "groupchat", "-n", name, cmd]
+                tmux_args = (["new-session", "-d", "-s", "groupchat", "-n", name, launch_cmd]
                              if not tmux_started
-                             else ["new-window", "-t", "groupchat", "-n", name, cmd])
+                             else ["new-window", "-t", "groupchat", "-n", name, launch_cmd])
                 subprocess.run(["tmux", *tmux_args], check=True,
                                capture_output=True, text=True)
                 tmux_started = True
@@ -675,6 +731,28 @@ def spawn_agents(names, cwd: str, method: str = "terminal",
         except Exception:
             pass
     return results
+
+
+def poll_joined(conn, names, timeout: float = 5.0, tick: float = 0.5) -> dict:
+    """Best-effort: wait up to ``timeout`` seconds for each handle in ``names`` to
+    appear as an *active* agent, so bootstrap can report who actually registered.
+
+    A spawned window where ``claude`` wasn't on PATH (or that is just slow to start)
+    simply reports not-yet — never an error. Returns ``{name: bool}``; exits early
+    once every name has joined."""
+    tick = max(0.05, tick)  # never let a bad tick reach time.sleep() as a negative
+    pending = set(names)
+    joined = {n: False for n in names}
+    deadline = time.monotonic() + max(0.0, timeout)
+    while pending and time.monotonic() < deadline:
+        active = {a["handle"] for a in active_agents(conn)}
+        for n in list(pending):
+            if n in active:
+                joined[n] = True
+                pending.discard(n)
+        if pending:
+            time.sleep(min(tick, max(0.0, deadline - time.monotonic())))
+    return joined
 
 
 def set_status(conn, session_id: str, status: str) -> None:
@@ -710,9 +788,46 @@ def expected_team_size(conn) -> int | None:
     return int(mv) if mv and mv.isdigit() else None
 
 
+def set_team_size(conn, n: int) -> None:
+    """Declare the expected team size (``expect`` / ``bootstrap``). Stamps *when* it
+    was set so a leftover from a long-departed cohort can later be told apart from a
+    fresh declaration for a still-assembling team — see the stale-size reclaim in
+    ``register()``. ``n <= 0`` clears the declaration."""
+    if n <= 0:
+        del_meta(conn, "team_size")
+        del_meta(conn, "team_size_at")
+        return
+    set_meta(conn, "team_size", str(n))
+    set_meta(conn, "team_size_at", now_iso())
+
+
+def _clear_stale_team_size(conn, session_id: str) -> None:
+    """Drop a leftover ``team_size`` declared by a now-departed cohort so a quick solo
+    session in a REUSED room isn't routed into the 90s wait. Fires only when the
+    just-registered ``session_id`` is the SOLE active agent AND the size was declared
+    more than one active-window ago (so the cohort that declared it has certainly aged
+    out) — a FRESH declaration for a still-assembling team is recent and is never
+    erased. A missing ``team_size_at`` (a pre-stamp leftover in an old db) reads as
+    +inf age, i.e. stale. The age gate also makes the read-then-delete race benign:
+    only provably-stale sizes are ever cleared. ``$GROUPCHAT_TEAM_SIZE`` (env) wins in
+    ``expected_team_size`` and is untouched here."""
+    if get_meta(conn, "team_size") is None:
+        return
+    if any(a["session_id"] != session_id for a in active_agents(conn)):
+        return  # a teammate anchors the cohort — the size is live
+    if iso_age_seconds(get_meta(conn, "team_size_at")) >= ACTIVE_WINDOW_SECONDS:
+        del_meta(conn, "team_size")
+        del_meta(conn, "team_size_at")
+
+
 def max_park_seconds() -> int:
     v = _env_int("GROUPCHAT_MAX_PARK")  # 0 is a valid (release-now) override
     return MAX_PARK_SECONDS if v is None else v
+
+
+def solo_grace_seconds() -> int:
+    v = _env_int("GROUPCHAT_SOLO_GRACE")  # 0 is a valid (no-wait) override
+    return SOLO_GRACE_SECONDS if v is None else v
 
 
 def cohort_age_seconds(conn) -> float:
@@ -729,12 +844,28 @@ def startup_guard_satisfied(conn) -> bool:
     """Has the team finished assembling enough to trust the barrier?
 
     Closes the ragged-startup race where a fast agent stops before slower
-    teammates have even registered (trivially satisfying an empty barrier).
+    teammates have even registered (trivially satisfying an empty barrier), while
+    keeping a *solo* agent from waiting for teammates who will never come.
+
+    Counts only **active** agents (not all-time rows): a stale row from a prior
+    run must never satisfy the size guard — that would defeat the barrier on any
+    reused room (premature exit). Mirrors ``cohort_age_seconds`` / ``team_done``.
     """
+    n_active = len(active_agents(conn))
     size = expected_team_size(conn)
     if size:
-        n = conn.execute("SELECT COUNT(*) AS c FROM agents").fetchone()["c"]
-        return n >= size
+        if n_active >= size:
+            return True
+        # A declared team that never fully assembles (a failed bootstrap window, a
+        # too-high size) must NOT hang everyone until the 2h ceiling: fall back to
+        # the startup grace so it releases at ~90s instead. A no-show is bounded.
+        return cohort_age_seconds(conn) >= STARTUP_GRACE_SECONDS
+    if n_active <= 1:
+        # Solo (or alone-so-far) with no declared size: only a brief settle window,
+        # not the full grace — a lone agent doesn't wait for absent teammates. A
+        # co-launched teammate that registers within the window flips us into the
+        # multi-agent branch below and gets the full ragged-startup grace.
+        return cohort_age_seconds(conn) >= solo_grace_seconds()
     return cohort_age_seconds(conn) >= STARTUP_GRACE_SECONDS
 
 
@@ -1202,6 +1333,23 @@ def cmd_who(args):
         cwd = f"  [{r['cwd']}]" if r["cwd"] else ""
         toks = f" · {_fmt_count(r['out_tokens'])} out" if r["out_tokens"] else ""
         print(f"{flag} {r['handle']}{crown}{status}{cwd}  (seen {_hhmm(r['last_seen'] or '')}){toks}")
+
+    # Team summary — how many instances are working, and against what target. Lets a
+    # human (and an agent reading `who`) see the count at a glance.
+    actives = active_agents(conn)
+    n = len(actives)
+    if n:
+        done = sum(1 for a in actives if (a["status"] or "") == DONE_STATUS)
+        size = expected_team_size(conn)
+        if size:
+            line = f"team: {n} active · {done} done · expecting {size}"
+            if size > n:
+                line += f" · {size - n} not yet joined"
+        elif n == 1:
+            line = "working solo — no team to wait for"
+        else:
+            line = f"team: {n} active · {done} done"
+        print(line)
     conn.close()
 
 
@@ -1321,8 +1469,11 @@ def cmd_expect(args):
     if args.n is None:
         size = expected_team_size(conn)
         print(f"expected team size: {size}" if size else "expected team size: (unset — using startup grace)")
+    elif args.n <= 0:
+        set_team_size(conn, args.n)
+        print("expected team size cleared (using startup grace)")
     else:
-        set_meta(conn, "team_size", str(args.n))
+        set_team_size(conn, args.n)
         print(f"expected team size set to {args.n}")
     conn.close()
     return 0
@@ -1379,10 +1530,13 @@ def cmd_bootstrap(args):
               f"pass --force to override.", file=sys.stderr)
         conn.close()
         return 1
+    # How many agents are already here (incl. the bootstrapper) — so the declared
+    # size below counts the whole team, not just the newcomers.
+    n_active_before = len(active_agents(conn))
     conn.close()
 
     results = spawn_agents(names, cwd, method=method, prompt=args.prompt,
-                           dry_run=args.dry_run)
+                           dry_run=args.dry_run, worktree=args.worktree)
     only_printing = args.dry_run or method == "print"
     verb = "would spawn" if only_printing else "spawned"
     ok = sum(1 for r in results if r["ok"])
@@ -1391,6 +1545,27 @@ def cmd_bootstrap(args):
         print(f"  {'✓' if r['ok'] else '✗'} {r['name']}")
         if r["error"]:
             print(f"      error: {r['error']}")
+
+    # Declare the team size the moment it's known — bootstrap *is* team formation —
+    # so the barrier is precise from t=0 and everyone (and `who`) knows the target.
+    # Skipped only for --dry-run (a pure preview). The size time-fallback means an
+    # optimistic count can never wedge the team: a no-show just delays to the grace.
+    if not only_printing and ok > 0:
+        # Only a real launch declares a size. A preview (--dry-run / --method print)
+        # spawns nothing, so committing a barrier of N nonexistent agents would force
+        # ~90s waits on whoever's here — the human declares via `expect N` once the
+        # windows are actually open.
+        size = n_active_before + ok
+        conn = connect()
+        set_team_size(conn, size)
+        conn.close()
+        print(f"\nDeclared team size: {size} "
+              f"(the barrier waits for the team; `expect N` to adjust).")
+        env_sz = (os.environ.get("GROUPCHAT_TEAM_SIZE") or "").strip()
+        if env_sz:
+            print(f"  note: $GROUPCHAT_TEAM_SIZE={env_sz} in your environment "
+                  f"overrides this — the barrier will use {env_sz}.")
+
     if only_printing:
         print("\nRun each in its own terminal:")
         for r in results:
@@ -1400,6 +1575,25 @@ def cmd_bootstrap(args):
     elif method == "terminal" and ok:
         print("\nEach opened in a new Terminal window — they'll join the chat. "
               "`who` to confirm; tell each what to do, or `/rename` to relabel.")
+    if args.worktree and ok and not args.dry_run:
+        print("Each runs in its own git worktree (branch groupchat/<name>) so file "
+              "edits can't collide; one shared chat.db keeps them in the same room. "
+              "Clean up later with `git worktree remove`.")
+
+    # For a real launch, give a quick joined-vs-not-yet readout — this catches a
+    # phantom ✓ (osascript returned 0 but `claude` wasn't on the child's PATH) and
+    # tells the human how many instances actually came up. Best-effort; never blocks.
+    if method in ("terminal", "tmux") and not args.dry_run and ok > 0:
+        conn = connect()
+        joined = poll_joined(conn, [r["name"] for r in results if r["ok"]])
+        conn.close()
+        n_join = sum(1 for v in joined.values() if v)
+        print(f"\n{n_join}/{ok} joined the chat so far.")
+        not_yet = [n for n, j in joined.items() if not j]
+        if not_yet:
+            print(f"  not yet: {', '.join(not_yet)} "
+                  "(usually appear within seconds — `who` to recheck; if one never "
+                  "joins, check that `claude` is on its PATH).")
     return 0 if all(r["ok"] for r in results) else 1
 
 
@@ -2202,6 +2396,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--prompt", help="initial prompt for each agent (default: none/idle)")
     sp.add_argument("--dry-run", action="store_true",
                     help="print the launch commands without spawning")
+    sp.add_argument("--worktree", action="store_true",
+                    help="give each spawned agent its own git worktree (branch "
+                         "groupchat/<name>) so their file edits can't collide")
     sp.add_argument("--force", action="store_true",
                     help=f"allow spawning more than {BOOTSTRAP_MAX} at once")
     sp.set_defaults(func=cmd_bootstrap)

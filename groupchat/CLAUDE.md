@@ -75,7 +75,19 @@ Three layers, all dependency-free Python 3 stdlib:
      that handle. Spawned agents are **idle** (they join the chat and wait). The
      "ask the human how many" UX lives in the `/groupchat:team` command (Claude
      drives it); `chat.py bootstrap` itself is non-interactive (`--dry-run` previews;
-     a soft cap of `BOOTSTRAP_MAX`=8 needs `--force` to exceed).
+     a soft cap of `BOOTSTRAP_MAX`=8 needs `--force` to exceed). On a real spawn it
+     **declares the team size** (`meta['team_size'] = active + spawned`) so the
+     barrier is precise from t=0 and everyone knows the count, then briefly polls who
+     actually registered (catching a phantom ✓ where `claude` wasn't on the child's
+     PATH). The optimistic count can't wedge anyone — the startup-guard time fallback
+     releases a no-show at the 90s grace.
+   - **`--worktree` (file isolation).** `bootstrap --worktree` gives each spawned
+     agent its **own git worktree** (branch `groupchat/<name>` under a sibling
+     `<repo>-worktrees/<name>` dir) and launches it `cd`'d in, so parallel edits can't
+     collide. Because `store_dir()` anchors at the **git common dir**, all worktrees
+     still share one `chat.db` — full chat, zero file collisions. A worktree that
+     can't be created is reported and skipped (never silently downgraded to the shared
+     cwd); cleanup is the operator's (`git worktree remove`).
    - **Recycling.** "Taken" means *currently active* only — a closed/idle session's
      handle is reclaimed (its dead row deleted) the next time that name is assigned.
      So the pool doesn't march `ada→…→agent-N` and the `agents` table doesn't grow
@@ -109,10 +121,30 @@ blocks). So `stop.py` keeps a finished agent alive until the *whole team* is don
   every *active* agent is `done`. A crashed/silent agent ages out of the 15-min
   active window, so it can't wedge the team forever.
 - **Startup guard** closes the ragged-startup race (a fast agent stopping before
-  slower teammates have even registered → empty barrier → premature exit):
-  if `GROUPCHAT_TEAM_SIZE=N` is set (or `chat.py expect N`), require N agents
-  registered; otherwise require the current cohort to be ≥ `STARTUP_GRACE_SECONDS`
-  (90s) old. Set the size when you know it; the grace covers the zero-config case.
+  slower teammates have even registered → empty barrier → premature exit). It counts
+  **active** agents (never all-time rows — a stale row from a prior run must not
+  satisfy it), and resolves in three branches:
+  - a declared size (`GROUPCHAT_TEAM_SIZE=N` / `chat.py expect N` / `bootstrap`):
+    satisfied once N are active **or** the cohort is ≥ `STARTUP_GRACE_SECONDS` (90s)
+    old — the **time fallback** is what stops a never-assembled team (a failed
+    bootstrap window, a too-high size) from hanging everyone to the 2h ceiling;
+  - **solo / alone-so-far** with no declared size: only a short `SOLO_GRACE_SECONDS`
+    (10s) settle — long enough to catch a co-launched teammate a beat behind
+    registering (which flips us into the team branch), but a lone agent never waits
+    90s for nobody. **This is "when solo, don't wait".**
+  - an undeclared multi-agent cohort (≥2 already active): the full 90s grace.
+  Set the size when you know it (bootstrap does so automatically); the grace covers
+  the zero-config case. **Tradeoff:** the *first* agent of an **undeclared** cohort
+  looks solo while it's alone, so it only gets the ~10s settle, not 90s — if it
+  finishes a trivial slice before a co-launched teammate registers it may exit early.
+  For real multi-agent runs declare the size (`expect N` / `bootstrap`), which takes
+  the precise size branch and restores the bounded 90s fallback.
+  - **Stale-size reclaim.** A declared size is stamped when set; a leftover from a
+    *departed* cohort (stamp older than the 15-min active window) is cleared when a
+    fresh **solo** agent arrives, so a quick solo task in a *reused* room isn't routed
+    into the 90s wait. A fresh declaration (recent stamp) is never erased — it
+    survives the first teammate registering alone. Reset manually with `expect 0`;
+    `$GROUPCHAT_TEAM_SIZE` (env) is immune (it wins over meta and never auto-clears).
 - **Parking** is a blocking sleep-poll in the Stop hook, *not* a Claude turn — the
   session is dormant while it waits, so it costs ~0 tokens. It wakes on a new
   @mention (reply, then re-park) or on the barrier (exit together). An idle agent
@@ -131,6 +163,8 @@ blocks). So `stop.py` keeps a finished agent alive until the *whole team* is don
     i.e. wake latency (default 2).
   - `GROUPCHAT_TEAM_SIZE` — expected agent count; closes the startup race so the
     barrier is trustworthy immediately (else a 90s grace applies).
+  - `GROUPCHAT_SOLO_GRACE` — settle window for a lone, *undeclared* agent before its
+    barrier may complete (default 10; `0` = exit at once, never wait).
 
 ### The leadership layer (hub-and-spoke `@human` routing)
 
@@ -195,6 +229,7 @@ python3 .groupchat/chat.py bootstrap 3            # open 3 teammates (pool-named
 python3 .groupchat/chat.py bootstrap frontend qa  # ...or name them explicitly (alias: `team`)
 python3 .groupchat/chat.py bootstrap 3 --dry-run  # preview the launch commands without spawning
 python3 .groupchat/chat.py bootstrap 2 --method print|tmux   # paste-yourself / tmux session instead of Terminal
+python3 .groupchat/chat.py bootstrap 3 --worktree # isolate each teammate in its own git worktree (no file collisions)
 
 # Leadership — hub-and-spoke @human routing (elected/emergent lead)
 python3 .groupchat/chat.py lead                   # show the current lead + how it resolved
