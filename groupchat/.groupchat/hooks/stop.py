@@ -106,14 +106,13 @@ def main():
         chat.del_meta(conn, park_key)
         return
 
-    # 2. P2 — a lead that escalated to the operator is NOT done until answered.
-    #    The operator's reply (@<lead>) wakes it via _block_on_mention above; until
-    #    then it parks so the team never tears down with a question still open. No
-    #    new state — the open queue is derived from the message log; the ceiling
-    #    still releases it as a fail-safe if the operator never replies.
-    lead = chat.resolve_lead(conn)
-    awaiting_operator = bool(
-        lead and agent["handle"] == lead and chat.open_escalations(conn, lead))
+    # 2. P2 — an agent that escalated to the operator is NOT done until answered.
+    #    Keyed by THIS session (not the current-lead handle), so the asker stays gated
+    #    even after it renames or hands off the lead — the question can't be orphaned.
+    #    Only a lead ever authors an unquoted @human (a worker's is redirected). The
+    #    operator's reply (@<current handle>) wakes it via _block_on_mention above; the
+    #    park ceiling still releases it as a fail-safe if the operator never replies.
+    awaiting_operator = bool(chat.session_open_escalations(conn, sid))
 
     # Trying to stop with an empty inbox == "my slice is done" — unless we're the
     # lead still owing the operator a reply.
@@ -166,11 +165,11 @@ def main():
 
     # Window elapsed with nothing new: cheap re-park so Claude doesn't busy-spin.
     if awaiting_operator:
-        n = len(chat.open_escalations(conn, lead))
+        n = len(chat.session_open_escalations(conn, sid))
         reason = (
-            f"Parked: you're the lead awaiting the operator's reply on {n} open "
-            "@human escalation(s). You'll wake when an operator message @mentions "
-            "you; until then the team stays up. You may stop (you'll keep waiting)."
+            f"Parked: you're awaiting the operator's reply on {n} open @human "
+            "escalation(s). You'll wake when an operator message @mentions you; until "
+            "then the team stays up. You may stop (you'll keep waiting)."
         )
     else:
         waiting = [a["handle"] for a in chat.active_agents(conn)

@@ -125,14 +125,12 @@ def test_quoted_token_does_not_wedge_the_barrier(c):
                 "real question" in q2.stdout, q2.stdout)
 
 
-def test_handoff_orphans_escalation_is_documented(c):
-    """DOCUMENTED limitation (tesla's review #68): a leadership *handoff* while an
-    @human escalation is pending leaves it un-gated — the new lead owns the channel
-    and is not held by the old lead's question, and the operator view (which tracks
-    the current lead) no longer surfaces it. Accepted over a room-wide gate because
-    the common leadership-change is failover (the asker ages out → the question is
-    inherently best-effort anyway); the message itself still sits in `log`. Pinned
-    so a future room-wide gate is a conscious change, not an accidental regression."""
+def test_handoff_does_not_orphan_escalation(c):
+    """FIXED in Phase 5 (was tesla's review #68 limitation): a leadership *handoff* while
+    an @human escalation is pending no longer orphans it. The operator view is now
+    room-wide (keyed by author SESSION, not the current-lead handle), so the question
+    stays visible after the asker hands off the lead, and the asker stays gated until
+    answered. See `docs/plans/2026-06-23-phase5-correctness-design.md`."""
     with tmp_root() as root:
         env = env_for(root, GROUPCHAT_TEAM_SIZE=2)
         cli(["init"], env)
@@ -140,13 +138,12 @@ def test_handoff_orphans_escalation_is_documented(c):
         cli(["register", "--session", "s2", "--from", "bohr"], env)
         cli(["send", "--from", "ada", "@human pending question?"], env)  # ada escalates
         q1 = cli(["questions"], env)
-        c.check("before handoff: the lead's escalation is visible to the operator",
+        c.check("before handoff: the escalation is visible to the operator",
                 "pending question" in q1.stdout, q1.stdout)
         cli(["lead", "bohr"], env)   # hand the lead to bohr while ada's q is open
         q2 = cli(["questions"], env)
-        c.check("[documented] after handoff the orphaned escalation drops from the "
-                "current-lead view (known limitation, not a room-wide gate)",
-                "no open escalation" in q2.stdout.lower(), q2.stdout)
+        c.check("after handoff the escalation is STILL visible room-wide (not orphaned)",
+                "pending question" in q2.stdout, q2.stdout)
 
 
 def main():
@@ -156,7 +153,7 @@ def main():
               test_lead_without_escalation_exits_normally,
               test_awaiting_lead_holds_the_whole_team,
               test_quoted_token_does_not_wedge_the_barrier,
-              test_handoff_orphans_escalation_is_documented):
+              test_handoff_does_not_orphan_escalation):
         try:
             t(c)
         except Exception as e:

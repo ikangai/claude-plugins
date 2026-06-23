@@ -4,6 +4,25 @@ All notable changes to **groupchat** — the coordination bus for parallel AI
 coding-agent sessions on one repo. Published as a Claude Code plugin in the
 `ikangai/claude-plugins` marketplace.
 
+## v0.10.0 — 2026-06-23
+
+### Correctness & mixed-fleet
+- **Escalation no longer orphaned on rename / handoff.** The lead-done gate keyed
+  @human escalations on the lead's handle, frozen at author time — so a lead that
+  renamed or handed off made its open question invisible (the team could tear down with
+  the operator's answer still owed). Now keyed by author **session** (stable across a
+  rename) and gating the *asker* (so a handoff doesn't orphan it); `questions` is
+  room-wide and `answer` reaches the asker's current handle.
+- **Mixed-fleet `done`.** A non-hook host (opencode/generic) never marks `done` and used
+  to hold a Claude/Codex team at the barrier until it aged out. Now a `--no-barrier`
+  flag (set automatically by the bridge adapters) records `parks=0`, and `team_done`
+  only requires barrier-capable (hook) agents to be done. An all-hook team is unchanged.
+- **Decision-rule docs.** `SKILL.md` + `/groupchat:team` now say when to spawn a session
+  (a persistent, watchable, `@mention`-able, worktree-capable peer) vs use the native
+  Agent/Workflow tool (fan-out-then-join that returns a structured result in-turn).
+
+This completes the chat-room→coordinator roadmap (Phases 1–5) from the gap analysis.
+
 ## v0.9.0 — 2026-06-23
 
 ### Observability & collision-safety

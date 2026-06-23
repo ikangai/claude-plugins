@@ -255,6 +255,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "agents", "spawned_by", "TEXT")
     # Per-agent "what I'm working on now" (Phase 4) — distinct from the barrier status.
     _add_column_if_missing(conn, "agents", "focus", "TEXT")
+    # Barrier capability (Phase 5): 1 if this agent has a Stop hook that marks done /
+    # parks (Claude, Codex), 0 for a non-hook host (opencode/generic) that never marks
+    # done — so a hook-less agent can't hold a hook team at the barrier. Default 1.
+    _add_column_if_missing(conn, "agents", "parks", "INTEGER NOT NULL DEFAULT 1")
     conn.execute(
         "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -438,11 +442,15 @@ def _assign_handle(conn: sqlite3.Connection, preferred: str | None = None) -> st
 
 def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
              pid: int | None = None, handle: str | None = None,
-             status: str | None = None) -> str:
+             status: str | None = None, parks: bool = True) -> str:
     """Idempotently ensure an agent row for ``session_id``; return its handle.
 
     Re-running (e.g. on every prompt) refreshes ``last_seen`` without changing
     the handle, so an agent keeps a stable identity for its whole session.
+
+    ``parks`` records barrier capability at first registration: a non-hook host
+    (opencode/generic, ``--no-barrier``) sets ``parks=False`` so it never holds a hook
+    team at the barrier (see ``team_done``).
     """
     row = conn.execute(
         "SELECT handle FROM agents WHERE session_id = ?", (session_id,)
@@ -457,6 +465,12 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
             sets.append("pid = ?"); params.append(pid)
         if status is not None:
             sets.append("status = ?"); params.append(status)
+        if not parks:
+            # One-way downgrade: a re-register declaring --no-barrier marks a non-hook
+            # host even if its first registration predated the flag. Never the reverse —
+            # a default (parks=True) refresh must not re-upgrade a parks=0 agent (a hook
+            # agent's every-turn refresh defaults True but its row is already 1).
+            sets.append("parks = 0")
         params.append(session_id)
         conn.execute(f"UPDATE agents SET {', '.join(sets)} WHERE session_id = ?", params)
         conn.commit()
@@ -497,10 +511,11 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
         try:
             conn.execute(
                 "INSERT INTO agents(session_id, handle, cwd, pid, status, "
-                "first_seen, last_seen, last_read_id, spawn_depth, spawned_by) "
-                "VALUES (?,?,?,?,?,?,?, (SELECT COALESCE(MAX(id),0) FROM messages), ?, ?)",
+                "first_seen, last_seen, last_read_id, spawn_depth, spawned_by, parks) "
+                "VALUES (?,?,?,?,?,?,?, (SELECT COALESCE(MAX(id),0) FROM messages), ?, ?, ?)",
                 (session_id, h, cwd, pid, status, ts, ts,
-                 current_spawn_depth(), os.environ.get("GROUPCHAT_SPAWNED_BY") or None),
+                 current_spawn_depth(), os.environ.get("GROUPCHAT_SPAWNED_BY") or None,
+                 1 if parks else 0),
             )
             conn.commit()
             _clear_stale_team_size(conn, session_id)
@@ -1037,7 +1052,14 @@ def team_done(conn) -> bool:
     active = active_agents(conn)
     if not active:
         return False
-    return all((a["status"] or "") == DONE_STATUS for a in active)
+    # Only barrier-capable agents (those with a Stop hook that marks done) gate the
+    # barrier — a non-hook host (opencode/generic, parks=0) never marks done and must
+    # not hold a hook team. They still count toward assembly (startup guard); they just
+    # don't block the all-done check.
+    barrier = [a for a in active if a["parks"]]
+    if not barrier:
+        return False
+    return all((a["status"] or "") == DONE_STATUS for a in barrier)
 
 
 # --------------------------------------------------------------------------- #
@@ -1564,6 +1586,18 @@ def _apply_human_guard(conn, sender: str, body: str) -> str:
     return _redirect_mention(body, HUMAN_TOKEN, target) if target else body
 
 
+def _mentions(row) -> list:
+    """A message row's stored ``mentions`` list, parsed FAIL-SAFE: a corrupt / non-list
+    value reads as ``[]`` rather than raising. Load-bearing — the escalation gate runs
+    inside the Stop hook, and an exception there would escape the gate branch and let an
+    agent stop with the operator's answer still owed (mirrors ``_dismissed_set``)."""
+    try:
+        v = json.loads(row["mentions"] or "[]")
+        return v if isinstance(v, list) else []
+    except Exception:
+        return []
+
+
 def open_escalations(conn, lead: str) -> list[int]:
     """Message-ids of the lead's @human escalations the operator still owes a reply
     on — the read side of the P2 lead-done gate. Walking chat chronologically: each
@@ -1593,9 +1627,62 @@ def open_escalations(conn, lead: str) -> list[int]:
     for r in rows:
         if r["sender"] == lead and _has_unquoted_human(r["body"]):
             open_ids.append(r["id"])              # a real (unquoted) escalation by the lead
-        elif r["sender"] == HUMAN_TOKEN and lead in json.loads(r["mentions"] or "[]"):
+        elif r["sender"] == HUMAN_TOKEN and lead in [m.lower() for m in _mentions(r)]:
             open_ids = []                         # operator answered → queue cleared
     return open_ids
+
+
+def session_open_escalations(conn, session_id: str) -> list[int]:
+    """Open @human escalation ids authored by THIS session — the lead-done gate, keyed
+    by SESSION rather than handle so it survives a rename AND a lead handoff. The asker
+    stays gated until answered even after it renames or hands off the lead role (only a
+    lead ever authors an unquoted @human — a worker's is redirected). Cleared by an
+    operator reply (`sender == 'human'`) @mentioning the session's CURRENT handle.
+
+    Matching by session_id is what fixes the orphan: an escalation's stored ``sender``
+    is frozen at author time, so a rename/handoff made the old handle-keyed lookup miss
+    it (the team could tear down with the operator's answer still owed). Authorship is
+    matched STRICTLY on session_id (every real escalation carries one — a worker's/
+    unregistered @human is redirected) so a recycled handle can't be mis-gated."""
+    a = agent_by_session(conn, session_id)
+    if not a:
+        return []
+    handle = (a["handle"] or "").strip().lower()
+    rows = conn.execute(
+        "SELECT id, sender, session_id, body, mentions FROM messages "
+        "WHERE kind='chat' ORDER BY id ASC").fetchall()
+    open_ids: list[int] = []
+    for r in rows:
+        if r["session_id"] == session_id and _has_unquoted_human(r["body"]):
+            open_ids.append(r["id"])
+        elif r["sender"] == HUMAN_TOKEN and handle in [m.lower() for m in _mentions(r)]:
+            open_ids = []
+    return open_ids
+
+
+def all_open_escalations(conn) -> dict:
+    """``{session_id: [msg_ids]}`` for every unanswered @human escalation room-wide — so
+    the operator's ``questions`` view shows what they owe across renames AND handoffs
+    (not just the *current* lead's). Each session's queue clears on an operator reply
+    @mentioning that session's CURRENT handle."""
+    sess_handle = {r["session_id"]: (r["handle"] or "").strip().lower()
+                   for r in conn.execute("SELECT session_id, handle FROM agents").fetchall()}
+    handle_sess = {h: s for s, h in sess_handle.items() if h}
+    rows = conn.execute(
+        "SELECT id, sender, session_id, body, mentions FROM messages "
+        "WHERE kind='chat' ORDER BY id ASC").fetchall()
+    queues: dict = {}
+    for r in rows:
+        if r["session_id"] and _has_unquoted_human(r["body"]):
+            queues.setdefault(r["session_id"], []).append(r["id"])
+        elif r["sender"] == HUMAN_TOKEN:
+            for m in _mentions(r):
+                sid = handle_sess.get(m.lower())
+                if sid in queues:
+                    queues[sid] = []
+    # Only surface queues whose author still has an agent row — a departed/recycled
+    # session's question is moot (the asker is gone) and would be unanswerable.
+    return {s: ids for s, ids in queues.items() if ids and s in sess_handle}
 
 
 # --------------------------------------------------------------------------- #
@@ -1747,7 +1834,8 @@ def cmd_init(args):
 def cmd_register(args):
     conn = connect()
     h = register(conn, args.session, cwd=args.cwd or os.getcwd(),
-                 pid=args.pid, handle=args.from_handle, status=args.status)
+                 pid=args.pid, handle=args.from_handle, status=args.status,
+                 parks=not getattr(args, "no_barrier", False))
     print(h)
     conn.close()
 
@@ -1784,27 +1872,25 @@ def cmd_send(args):
 
 
 def cmd_questions(args):
-    """Operator view: the lead's open @human escalations awaiting your answer.
-    Closes the discoverability half of the loop — the human sees, at a glance, what
-    the fleet needs from them and how to reply."""
+    """Operator view: every open @human escalation awaiting your answer, room-wide —
+    so a question whose author renamed or handed off the lead is still visible (not just
+    the *current* lead's). The human sees what the fleet needs and how to reply."""
     conn = connect()
-    lead = resolve_lead(conn)
-    if not lead:
-        print("(no active lead — no escalations)")
+    queues = all_open_escalations(conn)
+    if not queues:
+        print("(no open escalations — the fleet owes you nothing)")
         conn.close()
         return 0
-    ids = open_escalations(conn, lead)
-    if not ids:
-        print(f"(no open escalations — @{lead} owes you nothing)")
-        conn.close()
-        return 0
-    print(f"open escalation(s) from @{lead}  —  answer with: "
-          f'answer <id> "..."')
-    for mid in ids:
-        row = conn.execute(
-            "SELECT id, ts, body FROM messages WHERE id=?", (mid,)).fetchone()
-        if row:
-            print(f"  #{row['id']} {_hhmm(row['ts'])}  {row['body']}")
+    sess_handle = {r["session_id"]: r["handle"] for r in
+                   conn.execute("SELECT session_id, handle FROM agents").fetchall()}
+    print('open escalation(s) awaiting you  —  answer with: answer <id> "..."')
+    for sid, ids in queues.items():
+        h = sess_handle.get(sid, "?")
+        for mid in ids:
+            row = conn.execute(
+                "SELECT id, ts, body FROM messages WHERE id=?", (mid,)).fetchone()
+            if row:
+                print(f"  #{row['id']} {_hhmm(row['ts'])} @{h}: {row['body']}")
     conn.close()
     return 0
 
@@ -1818,7 +1904,7 @@ def cmd_answer(args):
     conn = connect()
     mid = args.msg_id
     row = conn.execute(
-        "SELECT sender, mentions FROM messages WHERE id=?", (mid,)).fetchone()
+        "SELECT sender, session_id, mentions FROM messages WHERE id=?", (mid,)).fetchone()
     if not row:
         print(f"no message #{mid}", file=sys.stderr)
         conn.close()
@@ -1830,15 +1916,21 @@ def cmd_answer(args):
               file=sys.stderr)
         conn.close()
         return 1
-    lead = row["sender"]  # the escalation's author is the lead who asked
+    # Reach the asker by its CURRENT handle (resolved via the frozen author session),
+    # so an answer still lands after the lead renamed. Falls back to the frozen sender.
+    target = row["sender"]
+    if row["session_id"]:
+        author = agent_by_session(conn, row["session_id"])
+        if author:
+            target = author["handle"]
     text = args.message if isinstance(args.message, str) else " ".join(args.message)
     text = text.strip()
     if not text:
         print("nothing to answer (empty message)", file=sys.stderr)
         conn.close()
         return 1
-    new_id = send(conn, HUMAN_TOKEN, f"@{lead} [re #{mid}] {text}", kind="chat")
-    print(f"answered #{mid} → @{lead} (sent #{new_id})")
+    new_id = send(conn, HUMAN_TOKEN, f"@{target} [re #{mid}] {text}", kind="chat")
+    print(f"answered #{mid} → @{target} (sent #{new_id})")
     conn.close()
     return 0
 
@@ -3356,6 +3448,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("register", help="register/refresh this agent, print its handle")
     add_identity(sp)
     sp.add_argument("--cwd"); sp.add_argument("--pid", type=int); sp.add_argument("--status")
+    sp.add_argument("--no-barrier", action="store_true",
+                    help="this host has no Stop hook (opencode/generic) — don't let it "
+                         "hold a hook team at the barrier")
     sp.set_defaults(func=cmd_register)
 
     sp = sub.add_parser("whoami", help="print this agent's handle")

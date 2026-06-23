@@ -118,8 +118,16 @@ blocks). So `stop.py` keeps a finished agent alive until the *whole team* is don
 - **Done = trying to stop with an empty inbox.** No new ritual; the Stop hook
   marks `status='done'` automatically. (`chat.py done` is the explicit form.)
 - **Barrier** (`chat.team_done`): satisfied when the startup guard holds **and**
-  every *active* agent is `done`. A crashed/silent agent ages out of the 15-min
-  active window, so it can't wedge the team forever.
+  every *active barrier-capable* agent is `done`. A crashed/silent agent ages out of
+  the 15-min active window, so it can't wedge the team forever. **Mixed-fleet (Phase 5):**
+  only `parks=1` agents (hosts with a Stop hook that marks done — Claude, Codex) gate
+  the all-done check; a non-hook host (opencode/generic, registered `--no-barrier`,
+  `parks=0`) never marks done and so can't hold a hook team at the barrier (it still
+  counts toward assembly). The bridge adapters register `--no-barrier` automatically.
+  Corollary (intended): the *last* hook agent tears down once it's done even if a
+  non-hook teammate is still active — a non-hook host doesn't participate in the
+  barrier protocol. ``--no-barrier`` is a one-way downgrade on re-register (a default
+  refresh never re-upgrades `parks`).
 - **Startup guard** closes the ragged-startup race (a fast agent stopping before
   slower teammates have even registered → empty barrier → premature exit). It counts
   **active** agents (never all-time rows — a stale row from a prior run must not
@@ -326,13 +334,17 @@ never sets a lead behaves byte-identically to the flat system.
   `★lead` (not the implicit floor, so flat rooms stay uncluttered).
 - **Escalation loop (the lead-done gate).** A lead that has escalated to the operator
   is **not done until answered**: the Stop hook parks it (status stays `active`, so the
-  whole team stays up) while `open_escalations(conn, lead)` is non-empty, releasing only
-  on the operator's reply or the park ceiling. The operator answers by replying `@<lead>`
-  — that reply *is* the answer signal (a single `@<lead>` message **batch-clears** every
-  pending question), so there's no new state and no second cursor. Operator commands:
-  `chat.py questions` (alias `escalations`) lists what the lead owes; `chat.py answer
-  <msg-id> "…"` posts the reply as the operator and wakes the lead. (Known edge: a lead
-  *handoff* with a pending escalation orphans it from the new lead's gate.)
+  whole team stays up) while it has an open escalation, releasing only on the operator's
+  reply or the park ceiling. **Keyed by author SESSION, not handle** (`session_open_escalations`,
+  Phase 5): an escalation's stored `sender` is frozen at author time, so the old
+  handle-keyed gate dropped it when the lead **renamed** or **handed off** — the team
+  could tear down with the operator's answer still owed. Now the *asker's* session stays
+  gated until answered, regardless of a rename/handoff. The operator answers by replying
+  `@<current handle>` — that reply **batch-clears** the queue (no new state, no second
+  cursor). Operator commands: `chat.py questions` shows **all** open escalations
+  room-wide (`all_open_escalations` — so a handed-off question is still visible, not just
+  the current lead's); `chat.py answer <msg-id> "…"` resolves the asker's *current*
+  handle via the frozen author session (so the reply lands after a rename) and wakes it.
 
 Read/write split: the read side (`resolve_lead` + guard) and the write side
 (`set_lead`) never co-edit a function — they meet only at `meta['lead']`. Rationale,
@@ -509,8 +521,9 @@ layer (tasks / assign / goal / per-agent bootstrap) is covered by
 `tests/tasks_test.py`, the fan-in layer (result / results / summary / worktrees) by
 `tests/fanin_test.py`, the control plane (standdown / dismiss / direct / @team /
 spawn-guard) by `tests/control_plane_test.py`, the observability layer (focus / cwd /
-claims / amber dot) by `tests/observability_test.py`; the constitution layer by
-`python3 tests/{constitution,cite_review,parliament}_test.py`.
+claims / amber dot) by `tests/observability_test.py`, the correctness & mixed-fleet
+layer (escalation rename/handoff, barrier capability) by `tests/correctness_test.py`;
+the constitution layer by `python3 tests/{constitution,cite_review,parliament}_test.py`.
 
 ```bash
 export GROUPCHAT_DIR=/tmp/gc_test          # isolate from the real room

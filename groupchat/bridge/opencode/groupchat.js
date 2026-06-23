@@ -31,7 +31,9 @@ export const GroupChat = async ({ $, directory, worktree }) => {
   async function register() {
     if (registered) return;
     try {
-      await $`python3 ${chat} register --session ${sid} --cwd ${root}`.quiet();
+      // --no-barrier: opencode has no Stop hook, so this agent never marks done; the
+      // flag keeps it from holding a hook (Claude/Codex) team at the team barrier.
+      await $`python3 ${chat} register --session ${sid} --cwd ${root} --no-barrier`.quiet();
       registered = true;
     } catch {
       /* fail open — never break an opencode session */
