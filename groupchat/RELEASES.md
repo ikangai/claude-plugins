@@ -4,6 +4,29 @@ All notable changes to **groupchat** — the coordination bus for parallel AI
 coding-agent sessions on one repo. Published as a Claude Code plugin in the
 `ikangai/claude-plugins` marketplace.
 
+## v0.8.0 — 2026-06-23
+
+### Control plane — steer and tear down a fleet
+- **`direct <handle> "…"`** (slash command **`/groupchat:direct`**) — an imperative
+  redirect: a blocking @mention after an active-set check.
+- **`@team` / `@all`** in a message expands to every active teammate, so a broadcast
+  actually blocks everyone's Stop (a plain message doesn't). `team`/`all` are reserved.
+- **`standdown` / `disband`** (slash command **`/groupchat:standdown`**) — the fleet
+  teardown switch: every parked agent is released from the barrier within a poll tick.
+  Auto-expires so a stale flag can't haunt a reused room; lead/operator-gated.
+- **`dismiss <handle>`** (slash command **`/groupchat:dismiss`**) — release ONE agent
+  from the barrier, so a still-active orchestrator doesn't pin its finished workers to
+  the park ceiling. One-shot (a revived agent rejoins) and fail-safe.
+
+### Safe autonomous spawning — the recursion backstop
+- **Spawn-depth + fleet guards.** `bootstrap` now threads
+  `GROUPCHAT_SPAWN_DEPTH`/`GROUPCHAT_SPAWNED_BY` to each spawned child and **refuses**
+  past the max spawn depth (default 2 — the runaway-recursion backstop) or the live
+  fleet ceiling (default 16). `--force` is the human override; the lineage is recorded
+  on each agent row. This is the safety layer that makes a Claude spawning a Claude
+  judicious rather than reckless. Tunables: `GROUPCHAT_MAX_SPAWN_DEPTH`,
+  `GROUPCHAT_MAX_FLEET`.
+
 ## v0.7.0 — 2026-06-23
 
 ### Fan-in — collect outcomes back to the orchestrator

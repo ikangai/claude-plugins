@@ -51,7 +51,11 @@ MENTION_RE = re.compile(r"(?<![\w/])@([a-z][a-z0-9_-]*)", re.IGNORECASE)
 # substrate) funnels worker→human questions through the lead, so @human is special
 # — it can never be an agent handle, and only the lead may address it directly.
 HUMAN_TOKEN = "human"
-RESERVED_HANDLES = frozenset({HUMAN_TOKEN})
+# Broadcast tokens: ``@team`` / ``@all`` expand to every active teammate, so a
+# broadcast actually blocks everyone's Stop (a plain message doesn't). Reserved like
+# @human so no agent can be named ``team``/``all`` and shadow the broadcast.
+BROADCAST_TOKENS = frozenset({"team", "all"})
+RESERVED_HANDLES = frozenset({HUMAN_TOKEN}) | BROADCAST_TOKENS
 # Markdown code spans (matched backtick runs, inline or fenced). The @human guard
 # leaves a *quoted* token alone so writing `@human` in docs/help/chat is not an
 # escalation — backreference \1 requires the closing run to match the opening run.
@@ -234,6 +238,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "agents", _col, "INTEGER NOT NULL DEFAULT 0")
     # Optional short heading for an add-motion's Article (else the (new rule) placeholder).
     _add_column_if_missing(conn, "motions", "title", "TEXT")
+    # Spawn lineage (Phase 3): how deep this agent was spawned and by whom — the
+    # autonomous-spawn audit trail. Guarded so old dbs upgrade in place.
+    _add_column_if_missing(conn, "agents", "spawn_depth", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "agents", "spawned_by", "TEXT")
     conn.execute(
         "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -476,9 +484,10 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
         try:
             conn.execute(
                 "INSERT INTO agents(session_id, handle, cwd, pid, status, "
-                "first_seen, last_seen, last_read_id) VALUES (?,?,?,?,?,?,?, "
-                "(SELECT COALESCE(MAX(id),0) FROM messages))",
-                (session_id, h, cwd, pid, status, ts, ts),
+                "first_seen, last_seen, last_read_id, spawn_depth, spawned_by) "
+                "VALUES (?,?,?,?,?,?,?, (SELECT COALESCE(MAX(id),0) FROM messages), ?, ?)",
+                (session_id, h, cwd, pid, status, ts, ts,
+                 current_spawn_depth(), os.environ.get("GROUPCHAT_SPAWNED_BY") or None),
             )
             conn.commit()
             _clear_stale_team_size(conn, session_id)
@@ -586,6 +595,29 @@ def active_agents(conn) -> list[sqlite3.Row]:
 # GROUPCHAT_HANDLE. Dormant until used — nothing here runs unless `bootstrap` is
 # called, so a repo that never bootstraps behaves exactly as before.
 BOOTSTRAP_MAX = 8  # soft cap so a fat-fingered count can't open a swarm of windows
+# Safe-autonomous-spawn backstops. A spawned agent inherits the full CLI + the skill
+# that advertises bootstrap, so recursive fan-out would otherwise be unbounded. Each
+# child is launched with GROUPCHAT_SPAWN_DEPTH+1; bootstrap refuses past the max depth
+# (runaway recursion) or the live-fleet ceiling. Both are env-tunable; --force overrides.
+MAX_SPAWN_DEPTH = 2   # how deep autonomous spawning may nest (the orchestrator is 0)
+MAX_FLEET = 16        # ceiling on simultaneously-active agents in one room
+
+
+def max_spawn_depth() -> int:
+    v = _env_int("GROUPCHAT_MAX_SPAWN_DEPTH")
+    return MAX_SPAWN_DEPTH if v is None else v
+
+
+def max_fleet() -> int:
+    v = _env_int("GROUPCHAT_MAX_FLEET")
+    return MAX_FLEET if v is None else v
+
+
+def current_spawn_depth() -> int:
+    """This process's spawn depth (0 for a human-launched/root agent), from the env a
+    parent bootstrap threaded in. Floored at 0 so a negative env can't defeat the
+    ``depth >= max`` backstop or self-propagate a negative depth down the lineage."""
+    return max(0, _env_int("GROUPCHAT_SPAWN_DEPTH", 0) or 0)
 
 
 def _pick_free_handles(conn, n: int, explicit: list[str] | None = None) -> list[str]:
@@ -628,11 +660,18 @@ def _default_spawn_method() -> str:
     return "terminal" if sys.platform == "darwin" else "print"
 
 
-def _spawn_command(name: str, cwd: str, prompt: str | None) -> str:
+def _spawn_command(name: str, cwd: str, prompt: str | None,
+                   depth: int = 0, spawned_by: str | None = None) -> str:
     """The shell command a spawned session runs: cd into the repo and launch claude
-    with its handle pre-set, so its SessionStart hook registers it under ``name``."""
+    with its handle pre-set, so its SessionStart hook registers it under ``name``.
+    ``GROUPCHAT_SPAWN_DEPTH``/``GROUPCHAT_SPAWNED_BY`` carry the spawn lineage to the
+    child so its own ``bootstrap`` is depth-limited (the runaway-recursion backstop)
+    and the agent row records who spawned it."""
     claude = shutil.which("claude") or "claude"
-    cmd = f"cd {shlex.quote(cwd)} && GROUPCHAT_HANDLE={name} {shlex.quote(claude)}"
+    env = f"GROUPCHAT_HANDLE={name} GROUPCHAT_SPAWN_DEPTH={int(depth)}"
+    if spawned_by:
+        env += f" GROUPCHAT_SPAWNED_BY={shlex.quote(spawned_by)}"
+    cmd = f"cd {shlex.quote(cwd)} && {env} {shlex.quote(claude)}"
     if prompt:
         cmd += " " + shlex.quote(prompt)
     return cmd
@@ -763,20 +802,23 @@ def _parse_spec(token: str) -> tuple[str, str | None]:
 
 def spawn_agents(names, cwd: str, method: str = "terminal",
                  prompt: str | None = None, dry_run: bool = False,
-                 worktree: bool = False, prompts: dict | None = None) -> list[dict]:
+                 worktree: bool = False, prompts: dict | None = None,
+                 depth: int = 0, spawned_by: str | None = None) -> list[dict]:
     """Open one agent session per handle in ``names``. Returns a per-name result
     list of dicts {name, command, ok, error}. ``dry_run`` (or method='print')
     spawns nothing and just reports the runnable commands. ``prompts`` maps a handle
     to its own initial prompt (per-agent work division); a handle absent from the map
-    falls back to the uniform ``prompt``. With ``worktree=True`` each agent gets its
-    own git worktree (branch ``groupchat/<name>``) so their file edits can't collide;
-    the shared chat.db (anchored at the git common dir) keeps them in one room."""
+    falls back to the uniform ``prompt``. ``depth``/``spawned_by`` are threaded to each
+    child as spawn lineage. With ``worktree=True`` each agent gets its own git worktree
+    (branch ``groupchat/<name>``) so their file edits can't collide; the shared chat.db
+    (anchored at the git common dir) keeps them in one room."""
     results: list[dict] = []
     tmux_started = False
     for name in names:
         this_prompt = (prompts.get(name) if prompts else None) or prompt
         launch_dir = _worktree_path(cwd, name) if worktree else cwd
-        launch_cmd = _spawn_command(name, launch_dir, this_prompt)
+        launch_cmd = _spawn_command(name, launch_dir, this_prompt,
+                                    depth=depth, spawned_by=spawned_by)
         # The reproducible one-liner shown to a human (print/dry-run) must also
         # create the worktree; the real-launch path makes it via subprocess first,
         # then runs only launch_cmd (re-running `git worktree add` would fail the
@@ -983,6 +1025,88 @@ def team_done(conn) -> bool:
     if not active:
         return False
     return all((a["status"] or "") == DONE_STATUS for a in active)
+
+
+# --------------------------------------------------------------------------- #
+# Control plane — release a fleet without waiting on the barrier
+# --------------------------------------------------------------------------- #
+# Steering used to be cooperative-only. These let an operator/lead release parked
+# agents: a team-wide ``standdown`` (everyone may stop now) or a per-agent ``dismiss``
+# (drop one worker so a still-active orchestrator doesn't pin it to the 2h ceiling).
+# The Stop-hook park loop reads ``released_from_barrier`` each tick. Dormant until used.
+def set_standdown(conn, reason: str | None = None) -> None:
+    """Declare a team-wide standdown (timestamped). Every parked agent is released
+    within one poll tick. Auto-expires after the active window so a stale flag can't
+    haunt a later cohort in a reused room; ``clear_standdown`` lifts it explicitly."""
+    set_meta(conn, "standdown", now_iso())
+    if reason:
+        set_meta(conn, "standdown_reason", reason.strip())
+    else:
+        del_meta(conn, "standdown_reason")
+
+
+def clear_standdown(conn) -> None:
+    del_meta(conn, "standdown")
+    del_meta(conn, "standdown_reason")
+
+
+def standdown_active(conn) -> bool:
+    ts = get_meta(conn, "standdown")
+    # A flag older than the active window is from a departed cohort — treat as lifted.
+    return bool(ts) and iso_age_seconds(ts) < ACTIVE_WINDOW_SECONDS
+
+
+def _dismissed_set(conn) -> set:
+    """The dismissed-session set, parsed FAIL-SAFE: a corrupt or non-list ``dismissed``
+    meta reads as empty rather than raising. This is load-bearing — ``is_dismissed``
+    runs inside the Stop hook, and an exception there would escape the barrier branch
+    and let an agent stop while teammates are unfinished (a premature teardown). Mirrors
+    the defensive parse in ``iso_age_seconds`` / ``sum_transcript_tokens``."""
+    try:
+        v = json.loads(get_meta(conn, "dismissed") or "[]")
+        return set(v) if isinstance(v, list) else set()
+    except Exception:
+        return set()
+
+
+def dismiss_agent(conn, handle: str) -> str | None:
+    """Release ONE active agent from the barrier (lead/operator action). Returns its
+    session id, or None if no such active agent. Marks it ``done`` (so it no longer
+    holds OTHER agents at the barrier) and adds its session id to the ``dismissed`` set
+    — keyed by session id, so it's immune to handle reuse, and pruned to live sessions
+    so the set stays bounded. Its own park loop sees the dismissal and exits."""
+    a = agent_by_handle(conn, (handle or "").strip().lower())
+    if not a or not _is_active(a["last_seen"]):
+        return None
+    sid = a["session_id"]
+    set_status(conn, sid, DONE_STATUS)
+    live = {x["session_id"] for x in active_agents(conn)}
+    current = {s for s in _dismissed_set(conn) if s in live}
+    current.add(sid)
+    set_meta(conn, "dismissed", json.dumps(sorted(current)))
+    return sid
+
+
+def is_dismissed(conn, session_id: str) -> bool:
+    return session_id in _dismissed_set(conn)
+
+
+def clear_dismissed(conn, session_id: str) -> None:
+    """Consume a ONE-SHOT dismissal: drop ``session_id`` from the dismissed set. Called
+    when a dismissed session is released (it's leaving) or REVIVES to answer a teammate
+    — so a revived agent rejoins the barrier instead of being stuck 'released' for the
+    rest of its life."""
+    cur = _dismissed_set(conn)
+    if session_id in cur:
+        cur.discard(session_id)
+        set_meta(conn, "dismissed", json.dumps(sorted(cur)))
+
+
+def released_from_barrier(conn, session_id: str) -> bool:
+    """Should this agent be let out of the barrier regardless of team-done? True under
+    a team-wide standdown or an individual dismissal. The Stop hook checks this each
+    park tick; a flat room never sets either, so it's always False there."""
+    return standdown_active(conn) or is_dismissed(conn, session_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -1353,6 +1477,21 @@ def clear_lead(conn) -> None:
 # --------------------------------------------------------------------------- #
 # Messaging
 # --------------------------------------------------------------------------- #
+def _expand_broadcast(conn, sender: str, mentions: list[str]) -> list[str]:
+    """Expand a ``@team`` / ``@all`` broadcast token into every active teammate (minus
+    the sender), so a broadcast actually @mentions — and thus blocks the Stop of —
+    everyone. The literal token is dropped (it's reserved, never a real handle). A
+    message without a broadcast token is returned unchanged."""
+    if not (BROADCAST_TOKENS & set(mentions)):
+        return mentions
+    # Exclude the sender and any reserved name (so a legacy agent literally named
+    # 'team'/'all' in an old db can't self-ping or mutually re-expand).
+    others = ({a["handle"] for a in active_agents(conn)}
+              - {(sender or "").strip().lower()} - set(RESERVED_HANDLES))
+    real = [m for m in mentions if m not in BROADCAST_TOKENS]
+    return sorted(set(real) | others)
+
+
 def send(conn, sender: str, body: str, session_id: str | None = None,
          kind: str = "chat") -> int:
     # Hub-and-spoke routing: a worker's @human is funnelled to the lead before the
@@ -1363,6 +1502,8 @@ def send(conn, sender: str, body: str, session_id: str | None = None,
     # Only chat messages carry @mentions: motions/votes/system must not block a
     # teammate's Stop or gate the barrier (they ride the bus without nagging).
     mentions = parse_mentions(body) if kind == "chat" else []
+    if kind == "chat":
+        mentions = _expand_broadcast(conn, sender, mentions)
     cur = conn.execute(
         "INSERT INTO messages(ts, sender, session_id, kind, body, mentions) "
         "VALUES (?,?,?,?,?,?)",
@@ -1673,6 +1814,9 @@ def cmd_who(args):
     tc = task_counts(conn)
     if tc["open"] or tc["claimed"]:
         print(f"tasks: {tc['open']} open · {tc['claimed']} claimed · {tc['done']} done")
+    if standdown_active(conn):
+        print("⚠ standdown active — agents are released from the barrier "
+              "(`standdown --clear` to lift)")
     conn.close()
 
 
@@ -2007,6 +2151,89 @@ def cmd_worktrees(args):
     return 0
 
 
+def cmd_direct(args):
+    """Imperatively redirect a teammate: an @mention (blocks their Stop, picked up on
+    their next turn) after checking the target is active."""
+    conn = connect()
+    a = _resolve_for_cli(conn, args)
+    sender = a["handle"] if a else (args.from_handle or "anon").strip().lower()
+    target = (args.handle or "").strip().lower()
+    if target not in {x["handle"] for x in active_agents(conn)}:
+        print(f"@{target} is not an active agent — can't direct it (`who` for the "
+              f"roster).", file=sys.stderr)
+        conn.close(); return 1
+    msg = " ".join(args.message).strip() if args.message else ""
+    if not msg:
+        print("nothing to direct (empty message)", file=sys.stderr)
+        conn.close(); return 1
+    mid = send(conn, sender, f"@{target} {msg}",
+               session_id=(a["session_id"] if a else None))
+    print(f"directed @{target} (#{mid})")
+    conn.close(); return 0
+
+
+def _control_caller_ok(conn, args):
+    """May the caller run a control action (standdown/dismiss)? Returns
+    ``(ok, caller, lead)``. The lead, the operator (sender 'human'), and a BARE CLI
+    invocation (no identity = the operator at the terminal) pass; a known worker (a
+    resolved/named non-lead agent) is rejected. ``--from`` is unauthenticated like
+    everywhere else — this is a guardrail against a worker *agent* disbanding the
+    fleet, not a security boundary."""
+    a = _resolve_for_cli(conn, args)
+    caller = (a["handle"] if a
+              else (getattr(args, "from_handle", None) or "").strip().lower() or None)
+    lead = resolve_lead(conn)
+    ok = caller is None or caller == lead or caller == HUMAN_TOKEN
+    return ok, caller, lead
+
+
+def cmd_standdown(args):
+    """Declare (or lift) a team-wide standdown — every parked agent is released from
+    the barrier within a poll tick. The teardown switch for a whole fleet. Lead/operator
+    only (a worker can't disband the fleet)."""
+    conn = connect()
+    ok, caller, lead = _control_caller_ok(conn, args)
+    if not ok:
+        print(f"only the lead (@{lead}) or the operator can call a standdown "
+              f"(you are @{caller}).", file=sys.stderr)
+        conn.close(); return 1
+    if getattr(args, "clear", False):
+        clear_standdown(conn)
+        send(conn, "system", "Standdown lifted — the team barrier is back to normal.",
+             kind="system")
+        print("standdown lifted")
+        conn.close(); return 0
+    reason = " ".join(args.reason).strip() if args.reason else ""
+    set_standdown(conn, reason or None)
+    send(conn, "system",
+         "Standdown — all agents may stop now and leave the barrier."
+         + (f" ({reason})" if reason else ""), kind="system")
+    print("standdown declared — parked agents are released within a poll tick "
+          "(`standdown --clear` to lift).")
+    conn.close(); return 0
+
+
+def cmd_dismiss(args):
+    """Release ONE agent from the barrier (lead/operator action) — so a still-active
+    orchestrator doesn't pin its finished workers to the park ceiling."""
+    conn = connect()
+    ok, caller, lead = _control_caller_ok(conn, args)
+    if not ok:
+        print(f"only the lead (@{lead}) or the operator can dismiss agents "
+              f"(you are @{caller}).", file=sys.stderr)
+        conn.close(); return 1
+    target = (args.handle or "").strip().lower()
+    sid = dismiss_agent(conn, target)
+    if not sid:
+        print(f"@{target} is not an active agent to dismiss.", file=sys.stderr)
+        conn.close(); return 1
+    send(conn, "system",
+         f"@{target} dismissed from the barrier by @{caller or 'the operator'} — "
+         "it may stop now.", kind="system")
+    print(f"dismissed @{target}")
+    conn.close(); return 0
+
+
 def cmd_rename(args):
     """Change your handle in place — keeps your session, history, and read cursor."""
     conn = connect()
@@ -2071,9 +2298,29 @@ def cmd_bootstrap(args):
     n_active_before = len(active_agents(conn))
     conn.close()
 
+    # Safe-autonomous-spawn backstops (the runaway-recursion / fleet-blowup guards).
+    # A spawned agent that itself runs bootstrap inherits a deeper GROUPCHAT_SPAWN_DEPTH;
+    # refuse past the max so recursive fan-out can't be unbounded, and past the live
+    # fleet ceiling. --force (a human's explicit override) bypasses both.
+    depth = current_spawn_depth()
+    if depth >= max_spawn_depth() and not args.force:
+        print(f"refusing to spawn: spawn depth {depth} is at the limit "
+              f"({max_spawn_depth()}) — this looks like runaway recursion. A human can "
+              f"pass --force; an agent should NOT spawn deeper.", file=sys.stderr)
+        return 1
+    if n_active_before + len(names) > max_fleet() and not args.force:
+        print(f"refusing to spawn: would put {n_active_before + len(names)} agents in "
+              f"the room, over the fleet ceiling ({max_fleet()}). Pass --force to "
+              f"override.", file=sys.stderr)
+        return 1
+
+    # Thread spawn lineage to the children: their depth is ours + 1, and we record
+    # ourselves as the spawner (the agent running bootstrap, if it has a handle).
+    spawner = os.environ.get("GROUPCHAT_HANDLE") or "bootstrap"
     results = spawn_agents(names, cwd, method=method, prompt=args.prompt,
                            dry_run=args.dry_run, worktree=args.worktree,
-                           prompts=(prompt_map or None))
+                           prompts=(prompt_map or None),
+                           depth=depth + 1, spawned_by=spawner)
     only_printing = args.dry_run or method == "print"
     verb = "would spawn" if only_printing else "spawned"
     ok = sum(1 for r in results if r["ok"])
@@ -2975,6 +3222,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--cwd", help="repo dir (default: cwd)")
     sp.set_defaults(func=cmd_worktrees)
 
+    sp = sub.add_parser("direct", help="imperatively redirect a teammate (a blocking @mention)")
+    add_identity(sp)
+    sp.add_argument("handle", help="the agent to direct")
+    sp.add_argument("message", nargs="+", help="the instruction")
+    sp.set_defaults(func=cmd_direct)
+
+    sp = sub.add_parser("standdown", aliases=["disband"],
+                        help="release the whole team from the barrier (teardown switch)")
+    add_identity(sp)
+    sp.add_argument("reason", nargs="*", help="optional reason to announce")
+    sp.add_argument("--clear", "--lift", action="store_true", help="lift a standdown")
+    sp.set_defaults(func=cmd_standdown)
+
+    sp = sub.add_parser("dismiss",
+                        help="[lead/operator] release ONE agent from the barrier")
+    add_identity(sp)
+    sp.add_argument("handle", help="the agent to dismiss")
+    sp.set_defaults(func=cmd_dismiss)
+
     sp = sub.add_parser("bootstrap", aliases=["team"],
                         help="spawn other Claude instances as named teammates")
     sp.add_argument("spec", nargs="*",
@@ -2991,7 +3257,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="give each spawned agent its own git worktree (branch "
                          "groupchat/<name>) so their file edits can't collide")
     sp.add_argument("--force", action="store_true",
-                    help=f"allow spawning more than {BOOTSTRAP_MAX} at once")
+                    help=f"a human's override: spawn past the count cap ({BOOTSTRAP_MAX}), "
+                         "the spawn-depth limit, and the fleet ceiling")
     sp.set_defaults(func=cmd_bootstrap)
 
     sp = sub.add_parser("install", help="install group chat into a target repo")
