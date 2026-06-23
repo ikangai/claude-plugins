@@ -238,6 +238,41 @@ table** (results reuse the `messages` table via a new `kind`). Design + review:
   branch against itself; an unresolvable `--base` errors rather than reporting a false
   "all clean".
 
+### The control plane (steer / tear down / spawn safely)
+
+Steering used to be cooperative-only. This layer expresses control as bus state the
+hooks already read — dormant until used. Design + review:
+`docs/plans/2026-06-23-phase3-control-plane-design.md`.
+
+- **`standdown` / `disband`** — a timestamped `standdown` meta flag (auto-expires after
+  the active window so a stale flag can't haunt a reused room). The Stop-hook park loop
+  reads `released_from_barrier` each tick and releases every parked agent. Lead/operator
+  -gated. `standdown --clear` lifts it; `who` shows it when active.
+- **`dismiss <handle>`** — release ONE agent from the barrier so a still-active
+  orchestrator doesn't pin its finished workers to the 2h ceiling. Keyed by **session
+  id** (immune to handle reuse); marks the agent `done` so it stops holding others.
+  **One-shot** — `clear_dismissed` consumes it when the agent revives (answers an
+  @mention) or leaves, so a revived agent rejoins the barrier instead of staying
+  released. `_dismissed_set` parses the set **fail-safe** (a corrupt meta reads as
+  empty → the agent stays parked, never a hook crash → premature teardown).
+- **Gating** — `_control_caller_ok`: the lead, the operator (sender `human`), and a
+  **bare** CLI invocation (no identity = the operator at the terminal) may run
+  `standdown`/`dismiss`; a known worker agent is rejected. `--from` is unauthenticated
+  (a guardrail, not a security boundary).
+- **`direct <handle> "…"`** — an imperative redirect: a blocking @mention after an
+  active-set check.
+- **`@team` / `@all`** — `_expand_broadcast` in `send()` rewrites the broadcast token to
+  every active teammate (minus the sender and reserved names), so a broadcast actually
+  @mentions — and blocks the Stop of — everyone. `team`/`all` are reserved handles.
+- **Spawn guard (safe autonomous spawn)** — `_spawn_command` threads
+  `GROUPCHAT_SPAWN_DEPTH`/`GROUPCHAT_SPAWNED_BY` to each child; `register` records the
+  `spawn_depth`/`spawned_by` lineage columns. `bootstrap` refuses past `MAX_SPAWN_DEPTH`
+  (default 2 — the runaway-recursion backstop) or `MAX_FLEET` (default 16); `--force` is
+  the human override. `current_spawn_depth` floors at 0 so a negative env can't defeat
+  the guard. It is **advisory** (an agent can set its own env), defending against
+  *accidental inherited* recursion — not a sandbox. Tunables:
+  `GROUPCHAT_MAX_SPAWN_DEPTH`, `GROUPCHAT_MAX_FLEET`.
+
 ### The leadership layer (hub-and-spoke `@human` routing)
 
 The flat room is exhausting for a human juggling N agents that each escalate
@@ -318,6 +353,13 @@ python3 .groupchat/chat.py result --from ada "lexer done, 3 files" --task 2   # 
 python3 .groupchat/chat.py results                # collect reported results (--from <h> to filter)
 python3 .groupchat/chat.py summary                # read-only digest: goal + roster + tasks + results
 python3 .groupchat/chat.py worktrees              # read-only diff of bootstrap --worktree branches (alias: harvest)
+
+# Control plane — steer / tear down / spawn safely
+python3 .groupchat/chat.py direct bob "switch to the API module now" --from ada   # blocking redirect
+python3 .groupchat/chat.py send --from ada "@team standup in 5"   # broadcast that blocks everyone's Stop
+python3 .groupchat/chat.py dismiss bob --from ada # [lead] release one finished worker from the barrier
+python3 .groupchat/chat.py standdown wrapping up  # [lead/operator] release the whole team (--clear to lift)
+GROUPCHAT_MAX_SPAWN_DEPTH=2 GROUPCHAT_MAX_FLEET=16 python3 .groupchat/chat.py bootstrap 3   # spawn backstops
 
 # Leadership — hub-and-spoke @human routing (elected/emergent lead)
 python3 .groupchat/chat.py lead                   # show the current lead + how it resolved
@@ -433,7 +475,8 @@ Dependency-free test scripts under `tests/` each isolate via `GROUPCHAT_DIR`; ru
 all with `python3 tests/run_all.py` (auto-discovers `*_test.py`). The work-division
 layer (tasks / assign / goal / per-agent bootstrap) is covered by
 `tests/tasks_test.py`, the fan-in layer (result / results / summary / worktrees) by
-`tests/fanin_test.py`; the constitution layer by
+`tests/fanin_test.py`, the control plane (standdown / dismiss / direct / @team /
+spawn-guard) by `tests/control_plane_test.py`; the constitution layer by
 `python3 tests/{constitution,cite_review,parliament}_test.py`.
 
 ```bash

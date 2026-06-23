@@ -48,8 +48,10 @@ def _block_on_mention(chat, conn, sid, path) -> bool:
     shown = unread[-CAP:]
     omitted = len(unread) - len(shown)
     chat.mark_read(conn, sid, unread[-1]["id"])
-    # The agent is about to do real work again — it's no longer "done".
+    # The agent is about to do real work again — it's no longer "done", and any
+    # one-shot dismissal is consumed so a revived agent rejoins the barrier.
     chat.set_status(conn, sid, "active")
+    chat.clear_dismissed(conn, sid)
     body = chat.format_messages(shown, highlight=handle)
     extra = f"\n…{omitted} older message(s) omitted — see `log`." if omitted else ""
     reason = (
@@ -95,6 +97,15 @@ def main():
         chat.del_meta(conn, park_key)  # doing real work -> reset the park clock
         return
 
+    # 1b. Control plane: a team-wide standdown or an individual dismissal releases this
+    #     agent from the barrier outright — allow the stop (after a pending @mention,
+    #     above, has had its one chance to surface). Marks done so it can't hold others.
+    if chat.released_from_barrier(conn, sid):
+        chat.set_status(conn, sid, chat.DONE_STATUS)
+        chat.clear_dismissed(conn, sid)  # consume a one-shot dismissal as it leaves
+        chat.del_meta(conn, park_key)
+        return
+
     # 2. P2 — a lead that escalated to the operator is NOT done until answered.
     #    The operator's reply (@<lead>) wakes it via _block_on_mention above; until
     #    then it parks so the team never tears down with a question still open. No
@@ -128,6 +139,12 @@ def main():
 
         # A teammate pinged us -> wake, hand it back, let the agent reply.
         if _block_on_mention(chat, conn, sid, path):
+            chat.del_meta(conn, park_key)
+            return
+
+        # Standdown / dismissed while parked -> released, exit now.
+        if chat.released_from_barrier(conn, sid):
+            chat.set_status(conn, sid, chat.DONE_STATUS)
             chat.del_meta(conn, park_key)
             return
 
