@@ -4,6 +4,30 @@ All notable changes to **groupchat** — the coordination bus for parallel AI
 coding-agent sessions on one repo. Published as a Claude Code plugin in the
 `ikangai/claude-plugins` marketplace.
 
+## v0.7.0 — 2026-06-23
+
+### Fan-in — collect outcomes back to the orchestrator
+- **`result --from <h> "…" [--task N]`** (slash command **`/groupchat:result`**). A
+  worker reports a structured outcome as a `kind='result'` message — it rides the bus
+  but carries **no @mention**, so it never blocks a teammate's Stop or wedges the
+  barrier (and never harvests a constitution rule cite). `--task N` also closes that
+  task; a nonexistent id is rejected before anything is stored, so the fan-in view is
+  never poisoned by a phantom-task result.
+- **`results [--from <h>]`** — the orchestrator's collected view of every reported
+  result, instead of prose-grepping the chat log.
+- **`summary`** (slash command **`/groupchat:summary`**) — a read-only one-shot digest:
+  goal + roster + task tally + results in a single call.
+
+### Worktree reconciliation — read-only, diff-only
+- **`worktrees`** (alias **`harvest`**, slash command **`/groupchat:harvest`**).
+  Reconciles the `bootstrap --worktree` branches for merging: per `groupchat/<name>`
+  branch ahead/behind, changed files, **cross-branch file overlaps** (the
+  merge-carefully signal), and an advisory merge order. It runs only read-only git
+  (`rev-list`/`diff`/`for-each-ref`) and **never merges** — the operator runs the
+  merges from the report. The base defaults to the main worktree's branch (so running
+  it from inside a worktree doesn't compare a branch against itself), and an
+  unresolvable `--base` errors instead of reporting a false "all clean".
+
 ## v0.6.0 — 2026-06-23
 
 ### Work division — a durable task ledger (the chat room becomes a coordinator)

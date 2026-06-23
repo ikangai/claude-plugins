@@ -207,9 +207,36 @@ used** — a room that never adds a task or sets a goal renders byte-identically
   fail-open `try` so a coordinator-surface error can never break the briefing (C2).
 
 This is Phase 1 of `docs/plans/2026-06-22-coordination-gap-analysis.md` (the
-chat-room→coordinator gap). Deferred to later phases: structured result fan-in
-(`kind='result'`), a control plane (`standdown`/`dismiss`/`direct`), a spawn-depth
-guard for autonomous spawning, and a `focus`/file-claim ledger.
+chat-room→coordinator gap). The fan-in half is the work-division layer's twin (below).
+Deferred to later phases: a control plane (`standdown`/`dismiss`/`direct`), a
+spawn-depth guard for autonomous spawning, and a `focus`/file-claim ledger.
+
+### The fan-in layer (results, summary, worktree reconciliation)
+
+Phase 1 pushes work *out*; this pulls outcomes *back in*, so an orchestrator collects
+structured results instead of prose-grepping the chat. Same invariants; **no new
+table** (results reuse the `messages` table via a new `kind`). Design + review:
+`docs/plans/2026-06-23-phase2-fanin-design.md`.
+
+- **`result --from <h> "…" [--task N]`** (`post_result`) posts a **`kind='result'`**
+  message. Since `send()` gives every non-chat kind an empty `mentions`, a result
+  **never @mentions anyone** — it can't block a Stop or gate the barrier, and (chat-only
+  cite harvest) never registers a rule cite. `--task N` also closes that task and tags
+  the body `[task #N]`. A nonexistent `--task` id raises *before* anything is stored
+  (no phantom-task result); `complete_task` returns `missing|already|done` so the close
+  is reported honestly.
+- **`results [--from <h>]`** (`list_results`) — the orchestrator's fan-in view; dormant
+  until used.
+- **`summary`** — a read-only digest (goal + roster + tasks + results) in one call.
+- **`worktrees` / `harvest` [--base <ref>]`** (`worktree_report`) — a read-only,
+  **diff-only** reconciliation of the `bootstrap --worktree` branches: per
+  `groupchat/<name>` branch ahead/behind, changed files, **cross-branch file overlaps**,
+  and an advisory merge order. It runs only `git rev-list`/`diff`/`for-each-ref`/
+  `rev-parse` (list-form `subprocess`, no shell — injection-safe) and **never merges**.
+  The base defaults to the **main** worktree's branch (`_default_base`, via `git
+  worktree list --porcelain`) so running it from *inside* a worktree doesn't compare a
+  branch against itself; an unresolvable `--base` errors rather than reporting a false
+  "all clean".
 
 ### The leadership layer (hub-and-spoke `@human` routing)
 
@@ -285,6 +312,12 @@ python3 .groupchat/chat.py task claim 2 --from ada    # atomically take an open 
 python3 .groupchat/chat.py task done 2 --from ada     # mark a task complete
 python3 .groupchat/chat.py assign frontend "build the error UI" --from ada   # hand @frontend a task (durable + @mention)
 python3 .groupchat/chat.py goal "ship v1"         # set/show/--clear the one-line shared objective
+
+# Fan-in — collect outcomes back to the orchestrator (results / summary / worktree reconcile)
+python3 .groupchat/chat.py result --from ada "lexer done, 3 files" --task 2   # report a result (closes task #2)
+python3 .groupchat/chat.py results                # collect reported results (--from <h> to filter)
+python3 .groupchat/chat.py summary                # read-only digest: goal + roster + tasks + results
+python3 .groupchat/chat.py worktrees              # read-only diff of bootstrap --worktree branches (alias: harvest)
 
 # Leadership — hub-and-spoke @human routing (elected/emergent lead)
 python3 .groupchat/chat.py lead                   # show the current lead + how it resolved
@@ -399,7 +432,8 @@ There is no test framework; verify by exercising the CLI and piping hook payload
 Dependency-free test scripts under `tests/` each isolate via `GROUPCHAT_DIR`; run them
 all with `python3 tests/run_all.py` (auto-discovers `*_test.py`). The work-division
 layer (tasks / assign / goal / per-agent bootstrap) is covered by
-`tests/tasks_test.py`; the constitution layer by
+`tests/tasks_test.py`, the fan-in layer (result / results / summary / worktrees) by
+`tests/fanin_test.py`; the constitution layer by
 `python3 tests/{constitution,cite_review,parliament}_test.py`.
 
 ```bash
@@ -427,6 +461,9 @@ channel. The SessionStart hook tells you your handle — use it:
   <you>` before starting — the claim is atomic, so if you lose the race you're told
   who holds it; coordinate rather than double-work. Add work with `task add` / hand a
   teammate a slice with `assign <handle> "..."`. `task done <id>` when finished.
+- **Report your result** when your slice is done — `result --from <you> "<outcome>"
+  [--task N]`. The orchestrator collects results (`results` / `summary`) instead of
+  re-reading the chat, so fan your outcome back in concisely.
 - **@mention** the specific agent when you need them; a plain message is a broadcast.
   Only @mentions block a teammate's Stop, so reserve them for things needing a reply.
 - **Answer mentions** — if your Stop hook surfaces an unanswered @mention, respond

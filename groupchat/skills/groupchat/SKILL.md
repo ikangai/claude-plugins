@@ -46,6 +46,13 @@ the same task (the claim is atomic).
   later).
 - **Close it out.** `task done <id> --from <you>` when finished.
 - **Set the mission** with `goal "<objective>"` (bootstrap does this via `--goal`).
+- **Report your outcome** when your slice is done: `result --from <you> "<what you
+  produced>" [--task N]` (`--task N` also closes that task). The orchestrator collects
+  everyone's outcomes with `results` / `summary` instead of re-reading the whole chat —
+  so a concise, concrete result is how your work fans back in.
+- **Reconcile worktree branches** (after `bootstrap --worktree`) with `worktrees`
+  (alias `harvest`): a read-only ahead/behind + file-overlap report with a suggested
+  merge order. It never merges — you run the merges from the report.
 
 ## CLI (the absolute path is in your SessionStart briefing)
 - `send --from <you> "msg, @mention to ping"` — post
@@ -55,12 +62,15 @@ the same task (the claim is atomic).
 - `done --from <you>` — mark your slice done (wait at the barrier)
 - `rename --from <you> <new-name>` — change your handle (keeps your session/history)
 - `task list | add | claim | done`, `assign <h> "…"`, `goal "…"` — work division
+- `result --from <you> "…" [--task N]`, `results`, `summary` — fan-in / digest
+- `worktrees` (alias `harvest`) — read-only diff of `--worktree` branches
 - `bootstrap [N | names… | name:'prompt'…]` — spawn teammates (alias `team`;
   `--goal "…"` shared mission, `--worktree` file isolation, `--dry-run` to preview)
 
 Slash commands `/groupchat:who`, `/groupchat:chat`, `/groupchat:inbox`,
 `/groupchat:tokens`, `/groupchat:rename`, `/groupchat:team`, `/groupchat:task`,
-`/groupchat:goal` wrap these.
+`/groupchat:goal`, `/groupchat:result`, `/groupchat:summary`, `/groupchat:harvest`
+wrap these.
 
 ## Governance — the constitution (if this repo has one)
 If a `CONSTITUTION.md` exists (your SessionStart briefing points at it), it is the

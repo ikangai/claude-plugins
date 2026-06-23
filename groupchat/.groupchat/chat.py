@@ -671,6 +671,85 @@ def _create_worktree(repo_cwd: str, path: str, name: str) -> str | None:
     return (r.stderr or "").strip() or "git worktree add failed"
 
 
+# --- Worktree reconciliation (read-only, diff-only) ---------------------------
+# `bootstrap --worktree` lands each agent on its own `groupchat/<name>` branch; this
+# is the collect side. It is strictly READ-ONLY — it computes ahead/behind, changed
+# files, and cross-branch overlaps so an operator can decide a merge order, but it
+# NEVER merges (the human runs the merges from the report).
+def _git_out(args: list[str], cwd: str) -> str | None:
+    """Run a git command, returning stripped stdout (None on any error)."""
+    try:
+        r = subprocess.run(["git", "-C", cwd, *args],
+                           capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def groupchat_branches(repo_cwd: str) -> list[str]:
+    """The ``groupchat/<name>`` branches in the repo (the bootstrap --worktree branches)."""
+    out = _git_out(["for-each-ref", "--format=%(refname:short)", "refs/heads/groupchat/"],
+                   repo_cwd)
+    return [b for b in (out or "").splitlines() if b.strip()]
+
+
+def _default_base(repo_cwd: str) -> str:
+    """The base to diff the worktree branches against: the MAIN worktree's branch — NOT
+    the cwd's current branch. Running ``worktrees`` from *inside* a ``groupchat/<name>``
+    worktree would otherwise default the base to that branch and compare it against
+    itself (silently zeroing its own work). ``git worktree list --porcelain`` lists the
+    main worktree first; we take its branch, falling back to the cwd's HEAD."""
+    out = _git_out(["worktree", "list", "--porcelain"], repo_cwd) or ""
+    block = out.split("\n\n", 1)[0]  # first block = the main worktree
+    for line in block.splitlines():
+        if line.startswith("branch "):
+            ref = line[len("branch "):].strip()
+            return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+    return _git_out(["rev-parse", "--abbrev-ref", "HEAD"], repo_cwd) or "HEAD"
+
+
+def worktree_report(repo_cwd: str, base: str | None = None) -> dict:
+    """A read-only reconciliation of the ``groupchat/*`` branches against ``base``
+    (default: the repo's current branch). Returns:
+      ``{base, branches:[{branch,name,ahead,behind,files,insertions,deletions}],
+         overlaps:[{file, branches:[…]}], order:[branch,…]}``
+    ``order`` is an advisory merge order (smallest blast radius first); ``overlaps``
+    flags files touched by more than one branch — the merge-carefully signal. Computes
+    nothing destructive: pure ``git rev-list``/``diff`` reads."""
+    base = base or _default_base(repo_cwd)
+    branches = []
+    files_by_branch: dict[str, set] = {}
+    for br in groupchat_branches(repo_cwd):
+        name = br.split("/", 1)[1] if "/" in br else br
+        counts = _git_out(["rev-list", "--left-right", "--count", f"{base}...{br}"], repo_cwd)
+        behind = ahead = 0
+        if counts and "\t" in counts:
+            left, _, right = counts.partition("\t")
+            behind, ahead = int(left or 0), int(right.strip() or 0)
+        files = [f for f in (_git_out(["diff", "--name-only", f"{base}...{br}"],
+                                      repo_cwd) or "").splitlines() if f.strip()]
+        ins = dele = 0
+        for line in (_git_out(["diff", "--numstat", f"{base}...{br}"], repo_cwd) or "").splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                ins += int(parts[0]) if parts[0].isdigit() else 0
+                dele += int(parts[1]) if parts[1].isdigit() else 0
+        files_by_branch[br] = set(files)
+        branches.append({"branch": br, "name": name, "ahead": ahead, "behind": behind,
+                         "files": files, "insertions": ins, "deletions": dele})
+    # Cross-branch file overlaps — the same path edited on two branches.
+    overlaps = []
+    all_files = sorted(set().union(*files_by_branch.values())) if files_by_branch else []
+    for f in all_files:
+        touched = sorted(br for br, fs in files_by_branch.items() if f in fs)
+        if len(touched) > 1:
+            overlaps.append({"file": f, "branches": touched})
+    # Advisory order: fewest files, then fewest commits ahead, then name.
+    order = [b["branch"] for b in sorted(
+        branches, key=lambda b: (len(b["files"]), b["ahead"], b["branch"]))]
+    return {"base": base, "branches": branches, "overlaps": overlaps, "order": order}
+
+
 def _parse_spec(token: str) -> tuple[str, str | None]:
     """Split a bootstrap spec ``name`` or ``name:prompt``. Handles are [a-z0-9_-], so
     the FIRST colon always separates the handle from its per-agent prompt — letting an
@@ -975,9 +1054,13 @@ def complete_task(conn, task_id: int,
     read overwrites the fresh owner, and two agents end up each believing they own the
     slice — the exact integrity failure the atomic claim was built to prevent.
     ``COALESCE(owner, ?)`` keeps any already-committed owner and only stamps the
-    completer when the column was NULL, so the claimer's ownership always survives."""
+    completer when the column was NULL, so the claimer's ownership always survives.
+
+    Returns ``(status, row)``: ``'missing'`` (no such task), ``'already'`` (was already
+    done — the UPDATE changed nothing), or ``'done'`` (this call closed it). Callers
+    that report a closure (``result --task``) need to tell a real close from a no-op."""
     h = (handle or "").strip().lower() or None
-    conn.execute(
+    cur = conn.execute(
         "UPDATE tasks SET status='done', owner=COALESCE(owner, ?) WHERE id=? AND status!='done'",
         (h, task_id),
     )
@@ -985,7 +1068,7 @@ def complete_task(conn, task_id: int,
     row = task_by_id(conn, task_id)
     if row is None:
         return ("missing", None)
-    return ("done", row)
+    return ("done" if cur.rowcount else "already", row)
 
 
 def list_tasks(conn, include_done: bool = False) -> list[sqlite3.Row]:
@@ -1069,6 +1152,48 @@ def _format_task(r) -> str:
     owner = f"→@{r['owner']}" if r["owner"] else ""
     paths = f"  ({r['paths']})" if r["paths"] else ""
     return f"#{r['id']} [{r['status']}{owner}] {r['title']}{paths}"
+
+
+# --------------------------------------------------------------------------- #
+# Fan-in — structured results back to the orchestrator
+# --------------------------------------------------------------------------- #
+# The other half of work division: when an agent finishes its slice it posts a
+# RESULT, so the orchestrator collects structured outcomes via ``results`` instead of
+# prose-grepping the chat log. A result is a ``kind='result'`` message — it rides the
+# same bus, but (like every non-chat kind) carries NO @mention, so it never blocks a
+# teammate's Stop or gates the barrier. Dormant until used.
+def post_result(conn, sender: str, body: str, session_id: str | None = None,
+                task_id: int | None = None) -> tuple[int, str | None]:
+    """Record a result; return ``(msg_id, task_status)``. With ``task_id`` it also
+    closes that task (the natural "finished my slice — here's the outcome") and tags
+    the body with the task ref so ``results`` lines outcomes up against the ledger.
+
+    A ``task_id`` that doesn't exist raises ``ValueError`` BEFORE anything is stored —
+    so a typo'd/stale id can't poison the fan-in view with a result that references a
+    phantom ledger row (and falsely reports it closed). ``task_status`` is
+    ``None``/``'done'``/``'already'`` so the caller reports the close honestly."""
+    body = (body or "").strip()
+    if not body:
+        raise ValueError("a result needs a body")
+    task_status = None
+    if task_id is not None:
+        task_status, _ = complete_task(conn, task_id, sender)
+        if task_status == "missing":
+            raise ValueError(f"no task #{task_id}")
+        body = f"[task #{task_id}] {body}"
+    return send(conn, sender, body, session_id=session_id, kind="result"), task_status
+
+
+def list_results(conn, sender: str | None = None,
+                 limit: int | None = None) -> list[sqlite3.Row]:
+    q = "SELECT * FROM messages WHERE kind='result'"
+    args: list = []
+    if sender:
+        q += " AND sender = ?"; args.append((sender or "").strip().lower())
+    q += " ORDER BY id ASC"
+    if limit:
+        q += f" LIMIT {int(limit)}"
+    return conn.execute(q, args).fetchall()
 
 
 # --------------------------------------------------------------------------- #
@@ -1770,6 +1895,116 @@ def cmd_goal(args):
     set_goal(conn, text)
     print(f"goal set: {text}")
     conn.close(); return 0
+
+
+def cmd_result(args):
+    """Report a structured result back to the orchestrator (`kind='result'`). With
+    `--task N` it also closes that task."""
+    conn = connect()
+    a = _resolve_for_cli(conn, args)
+    # Lowercase the unregistered-sender fallback so storage agrees with the
+    # case-insensitive `results --from` filter (registered handles are already lower).
+    sender = a["handle"] if a else (args.from_handle or "anon").strip().lower()
+    body = " ".join(args.message).strip() if args.message else ""
+    if not body:
+        print("nothing to report (empty result)", file=sys.stderr)
+        conn.close(); return 1
+    if args.task is not None and not (0 < args.task <= 2**63 - 1):
+        print(f"no task #{args.task}", file=sys.stderr); conn.close(); return 1
+    try:
+        mid, tstatus = post_result(conn, sender, body,
+                                   session_id=(a["session_id"] if a else None),
+                                   task_id=args.task)
+    except ValueError as e:
+        print(str(e), file=sys.stderr); conn.close(); return 1
+    note = ""
+    if tstatus == "done":
+        note = f" (closed task #{args.task})"
+    elif tstatus == "already":
+        note = f" (task #{args.task} was already done)"
+    print(f"result #{mid} recorded as {sender}{note}")
+    conn.close(); return 0
+
+
+def cmd_results(args):
+    """Collect the results agents have reported — the orchestrator's fan-in view."""
+    conn = connect()
+    rows = list_results(conn, sender=getattr(args, "from_handle", None))
+    if not rows:
+        print("(no results reported yet)")
+        conn.close(); return 0
+    for r in rows:
+        print(f"#{r['id']} {_hhmm(r['ts'])} {r['sender']}: {r['body']}")
+    print(f"— {len(rows)} result(s)")
+    conn.close(); return 0
+
+
+def cmd_summary(args):
+    """A read-only one-shot digest of the room: goal, roster, tasks, results — so a
+    human or an orchestrator gets the whole picture without four separate calls."""
+    conn = connect()
+    goal = get_goal(conn)
+    print(f"Goal: {goal}" if goal else "Goal: (none set)")
+
+    actives = active_agents(conn)
+    done = sum(1 for a in actives if (a["status"] or "") == DONE_STATUS)
+    roster = ", ".join(
+        f"{a['handle']}{' ✓' if (a['status'] or '') == DONE_STATUS else ''}" for a in actives)
+    print(f"Agents: {len(actives)} active · {done} done"
+          + (f" — {roster}" if roster else ""))
+
+    tc = task_counts(conn)
+    print(f"Tasks: {tc['open']} open · {tc['claimed']} claimed · {tc['done']} done")
+    for r in list_tasks(conn, include_done=False):
+        print(f"  {_format_task(r)}")
+
+    results = list_results(conn)
+    print(f"Results: {len(results)}")
+    for r in results:
+        print(f"  [{r['sender']}] {r['body']}")
+    conn.close(); return 0
+
+
+def cmd_worktrees(args):
+    """Read-only, DIFF-ONLY reconciliation of the `bootstrap --worktree` branches:
+    each `groupchat/<name>` branch's ahead/behind + changed files, cross-branch file
+    overlaps, and an advisory merge order. Never merges anything — the operator runs
+    the merges from this report."""
+    cwd = args.cwd or os.getcwd()
+    if _git_out(["rev-parse", "--git-dir"], cwd) is None:
+        print("not a git repository (worktree reconciliation needs git)", file=sys.stderr)
+        return 1
+    # Resolve and VALIDATE the base up front: an unresolvable ref would otherwise make
+    # every branch read +0/-0 — a false "all clean / nothing to merge" report.
+    base = args.base or _default_base(cwd)
+    if _git_out(["rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"], cwd) is None:
+        print(f"base ref '{base}' does not resolve to a commit "
+              "(pass a valid --base).", file=sys.stderr)
+        return 1
+    rep = worktree_report(cwd, base=base)
+    if not rep["branches"]:
+        print("no groupchat/* worktree branches found "
+              "(nothing from `bootstrap --worktree` to reconcile).")
+        return 0
+    print(f"worktree branches vs {rep['base']} (read-only — diff, never merge):")
+    for b in rep["branches"]:
+        print(f"  {b['branch']}: +{b['ahead']}/-{b['behind']} commits, "
+              f"{len(b['files'])} file(s) (+{b['insertions']}/-{b['deletions']})")
+        for f in b["files"]:
+            print(f"      {f}")
+    if rep["overlaps"]:
+        print("\n⚠ file overlaps (the same path edited on >1 branch — merge carefully):")
+        for o in rep["overlaps"]:
+            print(f"  {o['file']}: {', '.join(o['branches'])}")
+    else:
+        print("\nno file overlaps — branches touch disjoint files.")
+    print("\nsuggested merge order (smallest blast radius first):")
+    print("  " + " → ".join(rep["order"]))
+    # shlex.quote the suggestion so a copy-pasted branch name with shell metachars is
+    # safe in the operator's shell (the tool itself never runs this).
+    first = shlex.quote(rep["order"][0]) if rep["order"] else "<branch>"
+    print(f"\nMerge them yourself, e.g.:  git merge {first}")
+    return 0
 
 
 def cmd_rename(args):
@@ -2720,6 +2955,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("text", nargs="*", help="objective text (omit to show)")
     sp.add_argument("--clear", action="store_true", help="clear the goal")
     sp.set_defaults(func=cmd_goal)
+
+    sp = sub.add_parser("result", help="report a structured result to the orchestrator")
+    add_identity(sp)
+    sp.add_argument("message", nargs="+", help="the result / outcome to report")
+    sp.add_argument("--task", type=int, help="task id this result closes (marks it done)")
+    sp.set_defaults(func=cmd_result)
+
+    sp = sub.add_parser("results", help="collect reported results (fan-in view)")
+    sp.add_argument("--from", dest="from_handle", help="only this sender's results")
+    sp.set_defaults(func=cmd_results)
+
+    sp = sub.add_parser("summary", help="read-only digest: goal + roster + tasks + results")
+    sp.set_defaults(func=cmd_summary)
+
+    sp = sub.add_parser("worktrees", aliases=["harvest"],
+                        help="read-only diff of bootstrap --worktree branches (never merges)")
+    sp.add_argument("--base", help="base ref to diff against (default: current branch)")
+    sp.add_argument("--cwd", help="repo dir (default: cwd)")
+    sp.set_defaults(func=cmd_worktrees)
 
     sp = sub.add_parser("bootstrap", aliases=["team"],
                         help="spawn other Claude instances as named teammates")
