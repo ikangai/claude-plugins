@@ -65,6 +65,9 @@ CODE_SPAN_RE = re.compile(r"(`+)(?:.*?)\1", re.DOTALL)
 # R-squared family (no R0, no leading zeros, no `R2-squared`).
 RULE_RE = re.compile(r"(?<![\w/])R([1-9]\d*)\b")
 ACTIVE_WINDOW_SECONDS = 15 * 60  # an agent is "active" if seen within 15 min
+QUIET_SECONDS = 10 * 60          # an active, not-done agent that hasn't chatted in this
+                                 # long is flagged "quiet" (◐) — a soft stuck/heads-down
+                                 # signal. Override with GROUPCHAT_QUIET_SECS.
 
 # --- Team barrier (parallel /goal coordination) -------------------------------
 # A finished agent does not exit on its own; it waits at a barrier until the
@@ -231,6 +234,14 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             creator TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+        CREATE TABLE IF NOT EXISTS claims (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts         TEXT    NOT NULL,
+            session_id TEXT    NOT NULL,
+            handle     TEXT    NOT NULL,
+            glob       TEXT    NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_claims_session ON claims(session_id);
         """
     )
     # Token-usage columns (added post-v1; guarded so old dbs upgrade in place).
@@ -242,6 +253,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # autonomous-spawn audit trail. Guarded so old dbs upgrade in place.
     _add_column_if_missing(conn, "agents", "spawn_depth", "INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing(conn, "agents", "spawned_by", "TEXT")
+    # Per-agent "what I'm working on now" (Phase 4) — distinct from the barrier status.
+    _add_column_if_missing(conn, "agents", "focus", "TEXT")
     conn.execute(
         "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -1110,6 +1123,144 @@ def released_from_barrier(conn, session_id: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Collision-safety & observability — focus, shared-cwd, file claims, quiet-detection
+# --------------------------------------------------------------------------- #
+# The roster showed liveness but never WHAT each agent is doing or where collisions
+# lurk. These add a per-agent focus, a shared-working-tree warning, a structured
+# file-claim ledger, and a soft "gone quiet" signal. All dormant until used.
+def set_focus(conn, session_id: str, text: str | None) -> None:
+    """Set (or clear, with empty text) this agent's current-work focus — distinct from
+    the barrier ``status`` column, so it never affects done-detection. Interior
+    whitespace/newlines are collapsed so a focus can't spoof a roster line or inject
+    raw newlines into the briefing context."""
+    clean = " ".join((text or "").split()) or None
+    conn.execute("UPDATE agents SET focus = ? WHERE session_id = ?", (clean, session_id))
+    conn.commit()
+
+
+def quiet_seconds() -> int:
+    v = _env_int("GROUPCHAT_QUIET_SECS")
+    return QUIET_SECONDS if v is None else v
+
+
+def last_chat_age(conn, handle: str) -> float:
+    """Seconds since ``handle`` last posted a chat message; +inf if it never has."""
+    row = conn.execute(
+        "SELECT ts FROM messages WHERE kind='chat' AND sender=? ORDER BY id DESC LIMIT 1",
+        ((handle or "").strip().lower(),)).fetchone()
+    return iso_age_seconds(row["ts"]) if row else float("inf")
+
+
+def last_chat_ages(conn) -> dict:
+    """``{handle: seconds-since-last-chat}`` for every sender, in ONE grouped query — so
+    ``who`` computes quiet-detection without an N+1 per-agent message scan."""
+    rows = conn.execute(
+        "SELECT sender, MAX(ts) AS ts FROM messages WHERE kind='chat' GROUP BY sender"
+    ).fetchall()
+    return {r["sender"]: iso_age_seconds(r["ts"]) for r in rows}
+
+
+def is_quiet(conn, agent, chat_age: float | None = None) -> bool:
+    """A soft stuck/heads-down signal: the agent is active and NOT done, has been around
+    longer than the quiet window (so a fresh joiner isn't flagged), yet hasn't chatted
+    within it. Advisory only. A done (parked) agent and an agent with an explicit
+    ``focus`` (direct evidence it's mid-task) are never flagged. ``chat_age`` may be
+    passed pre-computed (so ``who`` avoids an N+1 per-agent message scan)."""
+    if (agent["status"] or "") == DONE_STATUS or not _is_active(agent["last_seen"]):
+        return False
+    if agent["focus"]:
+        return False  # an explicit focus is liveness — never contradict it with ◐
+    q = quiet_seconds()
+    age = iso_age_seconds(agent["first_seen"])
+    if not (age == age) or age == float("inf") or age < q:
+        return False  # unknown/NaN/too-fresh age -> not flagged (fail to not-quiet)
+    if chat_age is None:
+        chat_age = last_chat_age(conn, agent["handle"])
+    return chat_age >= q
+
+
+def shared_cwd_peers(conn, session_id: str) -> list[str]:
+    """Handles of OTHER active agents sharing this agent's working tree (same cwd) — the
+    high-collision config (parallel edits, no worktree isolation). Empty when the agent
+    has its own tree (e.g. a ``bootstrap --worktree`` agent) or is alone."""
+    me = agent_by_session(conn, session_id)
+    if not me or not me["cwd"]:
+        return []
+    mine = os.path.abspath(me["cwd"])
+    return sorted(a["handle"] for a in active_agents(conn)
+                  if a["session_id"] != session_id and a["cwd"]
+                  and os.path.abspath(a["cwd"]) == mine)
+
+
+def add_claim(conn, session_id: str, handle: str, glob: str) -> int:
+    """Record an intent-to-edit claim on a path glob. Idempotent per (session, glob):
+    re-claiming the same glob refreshes rather than duplicates."""
+    glob = " ".join((glob or "").split())  # collapse whitespace (no newline injection)
+    if not glob:
+        raise ValueError("a claim needs a path or glob")
+    conn.execute("DELETE FROM claims WHERE session_id=? AND glob=?", (session_id, glob))
+    cur = conn.execute(
+        "INSERT INTO claims(ts, session_id, handle, glob) VALUES (?,?,?,?)",
+        (now_iso(), session_id, (handle or "").strip().lower(), glob))
+    conn.commit()
+    return cur.lastrowid
+
+
+def release_claim(conn, session_id: str, glob: str) -> int:
+    cur = conn.execute("DELETE FROM claims WHERE session_id=? AND glob=?",
+                       (session_id, (glob or "").strip()))
+    conn.commit()
+    return cur.rowcount
+
+
+def active_claims(conn) -> list[sqlite3.Row]:
+    """Claims held by currently-active agents (a crashed agent's claims age out with
+    it, so the ledger self-cleans)."""
+    live = {a["session_id"] for a in active_agents(conn)}
+    rows = conn.execute("SELECT * FROM claims ORDER BY id").fetchall()
+    return [r for r in rows if r["session_id"] in live]
+
+
+def _glob_matches(glob: str, path: str) -> bool:
+    """Soft match of a claim ``glob`` against a file ``path``. Handles the cases that
+    matter: a wildcard glob against the ABSOLUTE path an Edit tool presents
+    (``src/auth/*.py`` ↔ ``/repo/src/auth/handler.py``), a basename glob (``*.py``), and
+    a directory-prefix claim (``src/auth`` ↔ ``…/src/auth/handler.py``). The directory
+    match is anchored to path COMPONENT boundaries, so a bare ``src`` does NOT match
+    ``…/mysrc/…`` and a one-letter claim doesn't grab the repo. Advisory only."""
+    import fnmatch
+    g = (glob or "").strip().replace("\\", "/")
+    p = (path or "").strip().replace("\\", "/")
+    if not g or not p:
+        return False
+    base = p.rsplit("/", 1)[-1]
+    # Direct fnmatch on the full path / basename, and the relative-glob-vs-absolute-path
+    # case (a leading ``*/`` lets a repo-relative glob match an absolute path tail).
+    if (fnmatch.fnmatch(p, g) or fnmatch.fnmatch(base, g)
+            or fnmatch.fnmatch(p, "*/" + g)):
+        return True
+    # Directory / prefix claim: the literal prefix before the first wildcard, matched at
+    # a component boundary (start, or bracketed by '/'), never a bare substring.
+    prefix = re.split(r"[*?\[]", g, maxsplit=1)[0].rstrip("/")
+    if not prefix:
+        return False
+    return (p == prefix or p.startswith(prefix + "/")
+            or ("/" + prefix + "/") in p or p.endswith("/" + prefix))
+
+
+def path_claimed_by(conn, path: str, exclude_session: str | None = None) -> list[tuple]:
+    """``(handle, glob)`` for every active claim (excluding ``exclude_session``) whose
+    glob matches ``path`` — the lookup an edit-time warning (or ``claims --path``) uses."""
+    out = []
+    for r in active_claims(conn):
+        if r["session_id"] == exclude_session:
+            continue
+        if _glob_matches(r["glob"], path):
+            out.append((r["handle"], r["glob"]))
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Work division — a durable task ledger + a shared goal
 # --------------------------------------------------------------------------- #
 # The chat is a room; these make it a coordinator. A ``tasks`` row is one slice of
@@ -1611,7 +1762,9 @@ def cmd_whoami(args):
 def cmd_send(args):
     conn = connect()
     a = _resolve_for_cli(conn, args)
-    sender = a["handle"] if a else (args.from_handle or "anon")
+    # Lowercase the unregistered-sender fallback so storage agrees with the lower-cased
+    # read side (mentions, last-chat lookups); registered handles are already lower.
+    sender = a["handle"] if a else (args.from_handle or "anon").strip().lower()
     body = args.message if isinstance(args.message, str) else " ".join(args.message)
     body = body.strip()
     if not body:
@@ -1770,7 +1923,8 @@ def cmd_tokens(args):
 
 def cmd_who(args):
     conn = connect()
-    rows = active_agents(conn) if not args.all else conn.execute(
+    actives = active_agents(conn)  # computed once, reused for render + summary + cwd
+    rows = actives if not args.all else conn.execute(
         "SELECT * FROM agents ORDER BY handle").fetchall()
     if not rows:
         print("(no agents)")
@@ -1780,17 +1934,26 @@ def cmd_who(args):
     _ptr = (get_meta(conn, "lead") or "").strip().lower()
     _env = (os.environ.get("GROUPCHAT_LEAD") or "").strip().lower()
     explicit_lead = lead if (lead and lead in (_ptr, _env)) else None
+    chat_ages = last_chat_ages(conn)        # one grouped query, not N
+    solo = len(actives) <= 1                # the quiet ◐ has no consumer when alone
     for r in rows:
-        flag = "●" if _is_active(r["last_seen"]) else "○"
+        # ● active · ◐ active-but-quiet (soft stuck/heads-down signal) · ○ idle.
+        if not _is_active(r["last_seen"]):
+            flag = "○"
+        elif not solo and is_quiet(conn, r, chat_age=chat_ages.get(r["handle"], float("inf"))):
+            flag = "◐"
+        else:
+            flag = "●"
         crown = " ★lead" if explicit_lead and r["handle"] == explicit_lead else ""
         status = f" — {r['status']}" if r["status"] else ""
+        foc = f" ▸ {r['focus']}" if r["focus"] else ""
         cwd = f"  [{r['cwd']}]" if r["cwd"] else ""
         toks = f" · {_fmt_count(r['out_tokens'])} out" if r["out_tokens"] else ""
-        print(f"{flag} {r['handle']}{crown}{status}{cwd}  (seen {_hhmm(r['last_seen'] or '')}){toks}")
+        print(f"{flag} {r['handle']}{crown}{status}{foc}{cwd}  "
+              f"(seen {_hhmm(r['last_seen'] or '')}){toks}")
 
     # Team summary — how many instances are working, and against what target. Lets a
     # human (and an agent reading `who`) see the count at a glance.
-    actives = active_agents(conn)
     n = len(actives)
     if n:
         done = sum(1 for a in actives if (a["status"] or "") == DONE_STATUS)
@@ -1817,6 +1980,21 @@ def cmd_who(args):
     if standdown_active(conn):
         print("⚠ standdown active — agents are released from the barrier "
               "(`standdown --clear` to lift)")
+
+    # Shared working tree — two+ active agents in one cwd (no worktree isolation) is the
+    # high-collision config. Dormant when each has its own tree (worktrees) or is solo.
+    bycwd: dict = {}
+    for a in actives:
+        if a["cwd"]:
+            bycwd.setdefault(os.path.abspath(a["cwd"]), []).append(a["handle"])
+    for hs in bycwd.values():
+        if len(hs) > 1:
+            print(f"⚠ shared working tree: {', '.join('@' + h for h in hs)} — flag files "
+                  "before editing (or use `bootstrap --worktree`)")
+    # Active file claims (who's editing what).
+    cl = active_claims(conn)
+    if cl:
+        print("claims: " + "; ".join(f"@{c['handle']} {c['glob']}" for c in cl))
     conn.close()
 
 
@@ -2231,6 +2409,82 @@ def cmd_dismiss(args):
          f"@{target} dismissed from the barrier by @{caller or 'the operator'} — "
          "it may stop now.", kind="system")
     print(f"dismissed @{target}")
+    conn.close(); return 0
+
+
+def cmd_focus(args):
+    """Set / clear / show your current-work focus — what `who` and the briefing show
+    teammates you're on right now (distinct from the barrier status)."""
+    conn = connect()
+    a = _resolve_for_cli(conn, args)
+    if not a:
+        print("(no agent identity; pass --from <your handle> or --session)", file=sys.stderr)
+        conn.close(); return 1
+    if getattr(args, "clear", False):
+        set_focus(conn, a["session_id"], "")
+        print("focus cleared")
+        conn.close(); return 0
+    text = " ".join(args.text).strip() if args.text else ""
+    if not text:
+        cur = agent_by_session(conn, a["session_id"])["focus"]
+        print(f"focus: {cur}" if cur else "(no focus set)")
+        conn.close(); return 0
+    set_focus(conn, a["session_id"], text)
+    print(f"focus set: {text}")
+    conn.close(); return 0
+
+
+def cmd_claim(args):
+    """Announce intent to edit files matching a glob — a structured 'I'm on these files'
+    teammates see in `claims` and their briefing (soft, advisory collision-safety)."""
+    conn = connect()
+    a = _resolve_for_cli(conn, args)
+    if not a:
+        print("(no agent identity; pass --from <your handle>)", file=sys.stderr)
+        conn.close(); return 1
+    glob = " ".join(args.glob).strip() if args.glob else ""
+    try:
+        add_claim(conn, a["session_id"], a["handle"], glob)
+    except ValueError as e:
+        print(str(e), file=sys.stderr); conn.close(); return 1
+    others = path_claimed_by(conn, glob, exclude_session=a["session_id"])
+    print(f"claimed {glob} as @{a['handle']}")
+    if others:
+        print("  ⚠ overlaps an existing claim: "
+              + ", ".join(f"@{h} ({g})" for h, g in others))
+    conn.close(); return 0
+
+
+def cmd_unclaim(args):
+    conn = connect()
+    a = _resolve_for_cli(conn, args)
+    if not a:
+        print("(no agent identity; pass --from <your handle>)", file=sys.stderr)
+        conn.close(); return 1
+    glob = " ".join(args.glob).strip() if args.glob else ""
+    n = release_claim(conn, a["session_id"], glob)
+    print(f"released {glob}" if n else f"(no claim {glob} to release)")
+    conn.close(); return 0
+
+
+def cmd_claims(args):
+    """List active file claims, or (`--path P`) who has claimed a given path."""
+    conn = connect()
+    if getattr(args, "path", None):
+        who = path_claimed_by(conn, args.path)
+        if not who:
+            print(f"(no active claim on {args.path})")
+        else:
+            for h, g in who:
+                print(f"@{h} claims {g}")
+        conn.close(); return 0
+    rows = active_claims(conn)
+    if not rows:
+        print("(no active claims)")
+    else:
+        for r in rows:
+            print(f"@{r['handle']}: {r['glob']}")
+        print(f"— {len(rows)} active claim(s)")
     conn.close(); return 0
 
 
@@ -3240,6 +3494,26 @@ def build_parser() -> argparse.ArgumentParser:
     add_identity(sp)
     sp.add_argument("handle", help="the agent to dismiss")
     sp.set_defaults(func=cmd_dismiss)
+
+    sp = sub.add_parser("focus", help="set / clear / show what you're working on now")
+    add_identity(sp)
+    sp.add_argument("text", nargs="*", help="focus text (omit to show)")
+    sp.add_argument("--clear", action="store_true", help="clear your focus")
+    sp.set_defaults(func=cmd_focus)
+
+    sp = sub.add_parser("claim", help="announce intent to edit files (a soft file-claim)")
+    add_identity(sp)
+    sp.add_argument("glob", nargs="+", help="path or glob you're about to edit")
+    sp.set_defaults(func=cmd_claim)
+
+    sp = sub.add_parser("unclaim", help="release a file-claim")
+    add_identity(sp)
+    sp.add_argument("glob", nargs="+", help="the claim to release")
+    sp.set_defaults(func=cmd_unclaim)
+
+    sp = sub.add_parser("claims", help="list active file-claims (or --path to look one up)")
+    sp.add_argument("--path", help="show who has claimed a given path")
+    sp.set_defaults(func=cmd_claims)
 
     sp = sub.add_parser("bootstrap", aliases=["team"],
                         help="spawn other Claude instances as named teammates")

@@ -66,6 +66,7 @@ the same task (the claim is atomic).
 - `worktrees` (alias `harvest`) — read-only diff of `--worktree` branches
 - `direct <h> "…"` — a blocking redirect; `@team`/`@all` in a message — broadcast-that-blocks
 - `dismiss <h>` / `standdown` — [lead/operator] release one agent / the whole team from the barrier
+- `focus "…"` — what you're on now (shown in `who`/briefing); `claim <glob>` / `claims` — soft file-claims
 - `bootstrap [N | names… | name:'prompt'…]` — spawn teammates (alias `team`;
   `--goal "…"` shared mission, `--worktree` file isolation, `--dry-run` to preview;
   depth/fleet-guarded for safe autonomous spawning)
@@ -73,7 +74,8 @@ the same task (the claim is atomic).
 Slash commands `/groupchat:who`, `/groupchat:chat`, `/groupchat:inbox`,
 `/groupchat:tokens`, `/groupchat:rename`, `/groupchat:team`, `/groupchat:task`,
 `/groupchat:goal`, `/groupchat:result`, `/groupchat:summary`, `/groupchat:harvest`,
-`/groupchat:direct`, `/groupchat:dismiss`, `/groupchat:standdown` wrap these.
+`/groupchat:direct`, `/groupchat:dismiss`, `/groupchat:standdown`, `/groupchat:focus`,
+`/groupchat:claims` wrap these.
 
 ## Governance — the constitution (if this repo has one)
 If a `CONSTITUTION.md` exists (your SessionStart briefing points at it), it is the

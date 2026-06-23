@@ -211,13 +211,15 @@ EXPECTED = {
     "messages": {"id", "ts", "sender", "session_id", "kind", "body", "mentions"},
     "agents": {"session_id", "handle", "cwd", "pid", "status", "first_seen",
                "last_seen", "last_read_id", "in_tokens", "out_tokens",
-               "cache_read_tokens", "cache_create_tokens", "spawn_depth", "spawned_by"},
+               "cache_read_tokens", "cache_create_tokens", "spawn_depth", "spawned_by",
+               "focus"},
     "meta": {"key", "value"},
     "rule_cites": {"id", "ts", "rule_id", "sender", "message_id"},
     "motions": {"id", "ts", "proposer", "target", "op", "change", "because",
                 "base_text", "new_id", "title", "status"},
     "votes": {"id", "ts", "motion_id", "voter_session", "voter_handle", "vote"},
     "tasks": {"id", "ts", "title", "owner", "status", "paths", "creator"},
+    "claims": {"id", "ts", "session_id", "handle", "glob"},
 }
 
 

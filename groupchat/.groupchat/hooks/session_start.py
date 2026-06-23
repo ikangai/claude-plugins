@@ -83,6 +83,20 @@ def main():
             coord.append(
                 f"Open tasks: {counts['open']} unclaimed — `chat.py task list` to see "
                 f"them, `chat.py task claim <id> --from {handle}` to take one.")
+        # Collision-safety: what teammates are focused on, a shared-tree warning, and
+        # who's editing what — so a joiner coordinates instead of colliding.
+        foci = [f"{a['handle']} ({a['focus']})" for a in others if a["focus"]]
+        if foci:
+            coord.append("Teammates' focus: " + ", ".join(foci))
+        peers = chat.shared_cwd_peers(conn, sid)
+        if peers:
+            coord.append("⚠ You share a working tree with "
+                         + ", ".join("@" + h for h in peers)
+                         + " — flag files before editing (or relaunch with a worktree).")
+        claims = [c for c in chat.active_claims(conn) if c["handle"] != handle]
+        if claims:
+            coord.append("Files claimed: " + "; ".join(
+                f"@{c['handle']} {c['glob']}" for c in claims))
     except Exception:
         coord = []  # never let the coordinator surface break the briefing (fail-open)
 
