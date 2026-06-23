@@ -273,6 +273,31 @@ hooks already read — dormant until used. Design + review:
   *accidental inherited* recursion — not a sandbox. Tunables:
   `GROUPCHAT_MAX_SPAWN_DEPTH`, `GROUPCHAT_MAX_FLEET`.
 
+### The observability layer (focus, shared-cwd, file claims, quiet-detection)
+
+The roster showed liveness but never *what* each agent is doing or where collisions
+lurk. This surfaces both — dormant until used. Design + review:
+`docs/plans/2026-06-23-phase4-observability-design.md`.
+
+- **`focus "…"`** (`set_focus`) — a per-agent current-work string in a `focus` column,
+  **distinct from the barrier `status`** (never read by `team_done`/`is_quiet`'s
+  exclusion is the only crossover). Shown in `who` (`▸ …`) and the briefing. Interior
+  whitespace is collapsed so it can't spoof a roster line or inject newlines.
+- **Shared-cwd warning** — `who`/briefing flag when 2+ active agents share an abspath
+  cwd (`shared_cwd_peers`) — the high-collision config. Dormant for a solo agent or a
+  worktree team (distinct cwds); this firing for a shared-tree team is *intended*.
+- **`claims` ledger** — `claim`/`unclaim`/`claims [--path]`. `add_claim` (dedup per
+  session+glob), `active_claims` (active agents only → self-cleaning), and
+  `path_claimed_by` + **`_glob_matches`** (fnmatch on path/basename, a leading-`*/` for
+  the relative-glob-vs-absolute-path case, and a **component-anchored** directory prefix
+  — so `src` doesn't match `…/mysrc/…` yet `src/auth/*.py` matches `/repo/src/auth/x.py`).
+  The substrate a future edit-time PreToolUse hook would consume (deferred — optional).
+- **Quiet-detection (◐)** — `who` shows `● active / ◐ quiet / ○ idle`. `is_quiet` =
+  active, not done, around longer than `QUIET_SECONDS` (env `GROUPCHAT_QUIET_SECS`), and
+  no chat within it — **suppressed** when the agent has a `focus` (focus is liveness),
+  when it's solo (no consumer), and on a NULL/NaN `first_seen`. `who` batches the
+  last-chat lookup (`last_chat_ages`, one grouped query) to avoid an N+1 scan.
+
 ### The leadership layer (hub-and-spoke `@human` routing)
 
 The flat room is exhausting for a human juggling N agents that each escalate
@@ -360,6 +385,13 @@ python3 .groupchat/chat.py send --from ada "@team standup in 5"   # broadcast th
 python3 .groupchat/chat.py dismiss bob --from ada # [lead] release one finished worker from the barrier
 python3 .groupchat/chat.py standdown wrapping up  # [lead/operator] release the whole team (--clear to lift)
 GROUPCHAT_MAX_SPAWN_DEPTH=2 GROUPCHAT_MAX_FLEET=16 python3 .groupchat/chat.py bootstrap 3   # spawn backstops
+
+# Observability & collision-safety — focus / claims / who-owns-what
+python3 .groupchat/chat.py focus "refactoring the auth handler" --from ada   # what you're on now
+python3 .groupchat/chat.py claim "src/auth/*.py" --from ada   # announce intent to edit (soft file-claim)
+python3 .groupchat/chat.py claims                 # who's editing what (--path <file> to look one up)
+python3 .groupchat/chat.py unclaim "src/auth/*.py" --from ada # release when done
+python3 .groupchat/chat.py who                    # ● active · ◐ quiet · ○ idle, with focus + shared-tree warning
 
 # Leadership — hub-and-spoke @human routing (elected/emergent lead)
 python3 .groupchat/chat.py lead                   # show the current lead + how it resolved
@@ -476,7 +508,8 @@ all with `python3 tests/run_all.py` (auto-discovers `*_test.py`). The work-divis
 layer (tasks / assign / goal / per-agent bootstrap) is covered by
 `tests/tasks_test.py`, the fan-in layer (result / results / summary / worktrees) by
 `tests/fanin_test.py`, the control plane (standdown / dismiss / direct / @team /
-spawn-guard) by `tests/control_plane_test.py`; the constitution layer by
+spawn-guard) by `tests/control_plane_test.py`, the observability layer (focus / cwd /
+claims / amber dot) by `tests/observability_test.py`; the constitution layer by
 `python3 tests/{constitution,cite_review,parliament}_test.py`.
 
 ```bash

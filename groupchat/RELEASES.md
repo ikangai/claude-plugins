@@ -4,6 +4,23 @@ All notable changes to **groupchat** — the coordination bus for parallel AI
 coding-agent sessions on one repo. Published as a Claude Code plugin in the
 `ikangai/claude-plugins` marketplace.
 
+## v0.9.0 — 2026-06-23
+
+### Observability & collision-safety
+- **`focus "…"`** (slash command **`/groupchat:focus`**) — a per-agent "what I'm on
+  right now," shown in `who` (`▸ …`) and every teammate's briefing. Distinct from the
+  barrier status, so it never affects done-detection.
+- **Shared-cwd warning.** `who` and the briefing flag when two or more active agents
+  share a working tree (the high-collision config) — coordinate or relaunch with
+  `bootstrap --worktree`.
+- **`claims` ledger** (slash command **`/groupchat:claims`**) — `claim <glob>` /
+  `unclaim` / `claims [--path]`: a structured "I'm editing these files" teammates see,
+  with overlap detection and a who-claims-this-path lookup. Self-cleaning (a crashed
+  agent's claims age out with it).
+- **Quiet-detection dot.** `who` now shows `● active · ◐ quiet · ○ idle` — `◐` is a
+  soft "active but hasn't chatted in a while" signal (suppressed for a focused or solo
+  agent, so it isn't noise). Tunable: `GROUPCHAT_QUIET_SECS`.
+
 ## v0.8.0 — 2026-06-23
 
 ### Control plane — steer and tear down a fleet
