@@ -34,7 +34,7 @@ HOOKS = os.path.join(GROUPCHAT, "hooks")
 # and let each call opt back in. (Without this, a parent session's
 # GROUPCHAT_TEAM_SIZE would silently skew every barrier assertion.)
 _SCRUB = (
-    "GROUPCHAT_TEAM_SIZE", "GROUPCHAT_MAX_PARK",
+    "GROUPCHAT_TEAM_SIZE", "GROUPCHAT_MAX_PARK", "GROUPCHAT_SOLO_GRACE",
     "GROUPCHAT_PARK_WINDOW", "GROUPCHAT_POLL_TICK", "GROUPCHAT_AMEND_SUPERMAJORITY",
     "GROUPCHAT_AMEND_QUORUM", "GROUPCHAT_REVIEW_LOW",
 )

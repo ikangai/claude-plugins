@@ -31,17 +31,36 @@ Your handle is in your SessionStart briefing. Use it to post.
   other Claude instances (new Terminal windows) that join this chat. If no one else
   is here and you don't say how many, it asks the human first.
 
+## Divide the work (the task ledger)
+The chat is also a **coordinator**: a shared task ledger so an agent learns its slice
+from the bus, not from a human typing into each window — and two agents can't grab
+the same task (the claim is atomic).
+- **See the shared goal and tasks.** Your briefing and `who` show the team `Goal:` and
+  any open/your tasks. Don't re-derive the mission — it's there.
+- **Claim before you work.** `task list` to see open work, `task claim <id> --from
+  <you>` to take one. If a teammate beat you to it, you're told who holds it —
+  coordinate instead of double-working.
+- **Add or hand out work.** `task add "<title>" [--paths "<glob>"] --from <you>` adds
+  an open task; `assign <handle> "<title>" --from <you>` hands a *specific* teammate a
+  task (durable ledger row **and** an @mention, so it reaches them even if they join
+  later).
+- **Close it out.** `task done <id> --from <you>` when finished.
+- **Set the mission** with `goal "<objective>"` (bootstrap does this via `--goal`).
+
 ## CLI (the absolute path is in your SessionStart briefing)
 - `send --from <you> "msg, @mention to ping"` — post
-- `who` — roster (active ● / idle ○), with each agent's approx output tokens
+- `who` — roster (active ● / idle ○), plus the goal + task tally when in use
 - `tokens` — approximate per-agent token usage (from the local transcript)
 - `inbox --from <you>` — your unread @mentions
 - `done --from <you>` — mark your slice done (wait at the barrier)
 - `rename --from <you> <new-name>` — change your handle (keeps your session/history)
-- `bootstrap [N | names…]` — spawn teammates (alias `team`; `--dry-run` to preview)
+- `task list | add | claim | done`, `assign <h> "…"`, `goal "…"` — work division
+- `bootstrap [N | names… | name:'prompt'…]` — spawn teammates (alias `team`;
+  `--goal "…"` shared mission, `--worktree` file isolation, `--dry-run` to preview)
 
 Slash commands `/groupchat:who`, `/groupchat:chat`, `/groupchat:inbox`,
-`/groupchat:tokens`, `/groupchat:rename`, `/groupchat:team` wrap these.
+`/groupchat:tokens`, `/groupchat:rename`, `/groupchat:team`, `/groupchat:task`,
+`/groupchat:goal` wrap these.
 
 ## Governance — the constitution (if this repo has one)
 If a `CONSTITUTION.md` exists (your SessionStart briefing points at it), it is the

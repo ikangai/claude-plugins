@@ -29,7 +29,9 @@ CAP = 40
 # Poll for this long, then re-park (< the Stop hook timeout of 600s). Env-tunable
 # (and shrunk in tests). Tick is the barrier / @mention detection latency.
 PARK_WINDOW_SECONDS = int(os.environ.get("GROUPCHAT_PARK_WINDOW") or 570)
-POLL_TICK_SECONDS = float(os.environ.get("GROUPCHAT_POLL_TICK") or 2)
+# Floored to a small positive: a negative env would reach time.sleep() (ValueError,
+# silently defeating the barrier for that agent); 0 would busy-spin the park window.
+POLL_TICK_SECONDS = max(0.05, float(os.environ.get("GROUPCHAT_POLL_TICK") or 2))
 
 
 def _block_on_mention(chat, conn, sid, path) -> bool:
@@ -118,7 +120,10 @@ def main():
 
     deadline = time.monotonic() + PARK_WINDOW_SECONDS
     while time.monotonic() < deadline:
-        time.sleep(POLL_TICK_SECONDS)
+        # Clamp the tick to the remaining window so a large GROUPCHAT_POLL_TICK (or
+        # lock contention) can't overshoot the window — and thus the Stop-hook
+        # timeout, which would get the hook killed and release the agent early.
+        time.sleep(min(POLL_TICK_SECONDS, max(0.0, deadline - time.monotonic())))
         chat.register(conn, sid)  # stay inside the active window while parked
 
         # A teammate pinged us -> wake, hand it back, let the agent reply.
@@ -153,11 +158,27 @@ def main():
     else:
         waiting = [a["handle"] for a in chat.active_agents(conn)
                    if (a["status"] or "") != chat.DONE_STATUS]
-        who = ", ".join(waiting) if waiting else "teammates"
-        reason = (
-            f"Still waiting at the team barrier — {who} not finished yet. "
-            "Nothing for you to do; you may stop (you'll keep waiting)."
-        )
+        if waiting:
+            reason = (
+                f"Still waiting at the team barrier — {', '.join(waiting)} not "
+                "finished yet. Nothing for you to do; you may stop (you'll keep waiting)."
+            )
+        else:
+            # Everyone present is done but the guard isn't satisfied yet — we're
+            # still assembling. Say so, rather than blaming absent "teammates".
+            size = chat.expected_team_size(conn)
+            n_active = len(chat.active_agents(conn))
+            if size and n_active < size:
+                reason = (
+                    f"Still assembling the team — {n_active}/{size} agents have "
+                    "joined. Waiting for the rest (or the startup grace). You may "
+                    "stop (you'll keep waiting)."
+                )
+            else:
+                reason = (
+                    "Settling at the team barrier (waiting out the brief startup "
+                    "grace). You may stop (you'll keep waiting)."
+                )
     print(json.dumps({"decision": "block", "reason": reason}))
 
 

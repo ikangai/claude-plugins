@@ -28,13 +28,63 @@ def main():
     # (`GROUPCHAT_HANDLE=frontend claude`) so the roster is self-identifying; falls
     # back to the auto-assigned pool name when unset. Honored only while the name is
     # free (recycled from inactive sessions), never stealing an active teammate's.
+    # Whether this session already had a row — distinguishes a genuine first join
+    # (worth announcing) from a resume (must NOT re-announce).
+    existed = chat.agent_by_session(conn, sid) is not None
     handle = chat.register(conn, sid, cwd=cwd, pid=os.getppid(),
                            handle=(os.environ.get("GROUPCHAT_HANDLE") or None))
     agent = chat.agent_by_session(conn, sid)
     path = os.path.abspath(chat.__file__)
 
     others = [a for a in chat.active_agents(conn) if a["handle"] != handle]
-    recent = chat.recent_messages(conn, RECENT)
+
+    # Announce a genuine first join into a NON-empty room so existing agents become
+    # aware of the new instance via their cursor. Solo joins stay silent (preserving
+    # byte-identical behaviour in an unused room); it's a broadcast with no @mention,
+    # so it never blocks anyone. Best-effort — a failure must not disturb the briefing.
+    if not existed and others:
+        try:
+            chat.send(conn, "system",
+                      f"{handle} joined the room — {len(others) + 1} agents active now.",
+                      kind="system")
+        except Exception:
+            pass
+
+    recent = chat.recent_messages(conn, RECENT)  # includes our own join notice
+
+    # Team-status line: how many instances are working, against any declared target —
+    # and an explicit "you won't wait" for a solo agent (goal: when solo, don't wait).
+    size = chat.expected_team_size(conn)
+    n_active = len(others) + 1
+    if size:
+        team_line = (f"Team: {n_active}/{size} agents active so far"
+                     + ("." if n_active >= size
+                        else f" — waiting on {size - n_active} more at the barrier."))
+    elif others:
+        team_line = (f"Team: {n_active} agents active "
+                     "(size undeclared — `expect N` to set it).")
+    else:
+        team_line = "Working solo — no team-barrier wait beyond a brief settle window."
+
+    # Coordination block — the shared goal, this agent's own assignments, and any
+    # unclaimed work. Dormant until used: a room with no goal and no tasks adds
+    # nothing here, so an unused room's briefing is byte-identical to before.
+    coord = []
+    try:
+        goal = chat.get_goal(conn)
+        if goal:
+            coord.append(f"Goal: {goal}")
+        mine = chat.agent_open_tasks(conn, handle)
+        if mine:
+            coord.append("Your task(s): " + "; ".join(
+                f"#{t['id']} {t['title']} [{t['status']}]" for t in mine))
+        counts = chat.task_counts(conn)
+        if counts["open"]:
+            coord.append(
+                f"Open tasks: {counts['open']} unclaimed — `chat.py task list` to see "
+                f"them, `chat.py task claim <id> --from {handle}` to take one.")
+    except Exception:
+        coord = []  # never let the coordinator surface break the briefing (fail-open)
 
     lines = [
         f"## Repo group chat — you are **{handle}**",
@@ -47,6 +97,8 @@ def main():
         "",
         ("Active teammates: " + ", ".join(a["handle"] for a in others)) if others
         else "No other active agents right now (you may be first).",
+        team_line,
+        *(([""] + coord) if coord else []),
         "",
         f'Post:    python3 "{path}" send --from {handle} "your message"',
         "Mention: include @handle in the text to ping a specific teammate",
