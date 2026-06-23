@@ -217,6 +217,16 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             voter_handle  TEXT NOT NULL,
             vote          TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS tasks (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts      TEXT    NOT NULL,
+            title   TEXT    NOT NULL,
+            owner   TEXT,
+            status  TEXT    NOT NULL DEFAULT 'open',
+            paths   TEXT,
+            creator TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
         """
     )
     # Token-usage columns (added post-v1; guarded so old dbs upgrade in place).
@@ -661,20 +671,33 @@ def _create_worktree(repo_cwd: str, path: str, name: str) -> str | None:
     return (r.stderr or "").strip() or "git worktree add failed"
 
 
+def _parse_spec(token: str) -> tuple[str, str | None]:
+    """Split a bootstrap spec ``name`` or ``name:prompt``. Handles are [a-z0-9_-], so
+    the FIRST colon always separates the handle from its per-agent prompt — letting an
+    orchestrator deal out DISTINCT work (``ada:'do X' turing:'do Y'``) instead of one
+    identical prompt to everyone."""
+    if ":" in token:
+        name, prompt = token.split(":", 1)
+        return name, (prompt.strip() or None)
+    return token, None
+
+
 def spawn_agents(names, cwd: str, method: str = "terminal",
                  prompt: str | None = None, dry_run: bool = False,
-                 worktree: bool = False) -> list[dict]:
+                 worktree: bool = False, prompts: dict | None = None) -> list[dict]:
     """Open one agent session per handle in ``names``. Returns a per-name result
     list of dicts {name, command, ok, error}. ``dry_run`` (or method='print')
-    spawns nothing and just reports the runnable commands. With ``worktree=True``
-    each agent gets its own git worktree (branch ``groupchat/<name>``) so their file
-    edits can't collide; the shared chat.db (anchored at the git common dir) keeps
-    them in one room."""
+    spawns nothing and just reports the runnable commands. ``prompts`` maps a handle
+    to its own initial prompt (per-agent work division); a handle absent from the map
+    falls back to the uniform ``prompt``. With ``worktree=True`` each agent gets its
+    own git worktree (branch ``groupchat/<name>``) so their file edits can't collide;
+    the shared chat.db (anchored at the git common dir) keeps them in one room."""
     results: list[dict] = []
     tmux_started = False
     for name in names:
+        this_prompt = (prompts.get(name) if prompts else None) or prompt
         launch_dir = _worktree_path(cwd, name) if worktree else cwd
-        launch_cmd = _spawn_command(name, launch_dir, prompt)
+        launch_cmd = _spawn_command(name, launch_dir, this_prompt)
         # The reproducible one-liner shown to a human (print/dry-run) must also
         # create the worktree; the real-launch path makes it via subprocess first,
         # then runs only launch_cmd (re-running `git worktree add` would fail the
@@ -881,6 +904,171 @@ def team_done(conn) -> bool:
     if not active:
         return False
     return all((a["status"] or "") == DONE_STATUS for a in active)
+
+
+# --------------------------------------------------------------------------- #
+# Work division — a durable task ledger + a shared goal
+# --------------------------------------------------------------------------- #
+# The chat is a room; these make it a coordinator. A ``tasks`` row is one slice of
+# work (open / claimed / done) so an agent can learn its task from the bus instead of
+# a human typing it into each window, and two agents can't both grab the same slice
+# (the claim is an ATOMIC, status-guarded UPDATE). A ``goal`` meta key holds the
+# one-line shared objective. Dormant until used: a room that never adds a task or sets
+# a goal renders byte-identically to before (the surfaces below check for emptiness).
+def add_task(conn, title: str, paths: str | None = None,
+             creator: str | None = None, owner: str | None = None,
+             status: str = "open") -> int:
+    """Append a task; return its id. ``owner``/``status`` let ``assign`` create a task
+    already claimed by a teammate in a single step."""
+    title = (title or "").strip()
+    if not title:
+        raise ValueError("a task needs a title")
+    cur = conn.execute(
+        "INSERT INTO tasks(ts, title, owner, status, paths, creator) VALUES (?,?,?,?,?,?)",
+        (now_iso(), title, (owner or None), status, (paths or None), (creator or None)),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def task_by_id(conn, task_id: int):
+    return conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+
+
+def claim_task(conn, task_id: int, handle: str) -> tuple[str, "sqlite3.Row | None"]:
+    """Atomically claim an OPEN task for ``handle``. Returns ``(result, row)``:
+      * ``('claimed', row)`` — newly claimed, or idempotently re-claimed by its owner;
+      * ``('taken', row)``   — already held by someone else;
+      * ``('done', row)``    — already completed;
+      * ``('missing', None)``— no such task.
+
+    The status-guarded UPDATE is the race fix: two agents racing to claim the same id
+    both run ``... WHERE id=? AND status='open'``; SQLite serializes the writes, so
+    exactly one row changes and the loser falls through to ``'taken'`` rather than
+    co-owning the slice (the "two agents grab the same task" gap)."""
+    h = (handle or "").strip().lower()
+    cur = conn.execute(
+        "UPDATE tasks SET owner=?, status='claimed' WHERE id=? AND status='open'",
+        (h, task_id),
+    )
+    conn.commit()
+    row = task_by_id(conn, task_id)
+    if row is None:
+        return ("missing", None)
+    if cur.rowcount:
+        return ("claimed", row)             # we won the race
+    if row["status"] == "done":
+        return ("done", row)
+    if (row["owner"] or "") == h:
+        return ("claimed", row)             # idempotent: already ours
+    return ("taken", row)
+
+
+def complete_task(conn, task_id: int,
+                  handle: str | None = None) -> tuple[str, "sqlite3.Row | None"]:
+    """Mark a task done (idempotent). Records ``handle`` as owner only when the task is
+    still unclaimed, so "who did it" is captured for a grab-and-finish.
+
+    A SINGLE atomic ``COALESCE`` UPDATE — NOT a read-then-write. A read-then-write
+    (read owner, compute ``owner or h``, then UPDATE) loses to a concurrent
+    ``claim_task``: if the claim commits between this op's read and write, the stale
+    read overwrites the fresh owner, and two agents end up each believing they own the
+    slice — the exact integrity failure the atomic claim was built to prevent.
+    ``COALESCE(owner, ?)`` keeps any already-committed owner and only stamps the
+    completer when the column was NULL, so the claimer's ownership always survives."""
+    h = (handle or "").strip().lower() or None
+    conn.execute(
+        "UPDATE tasks SET status='done', owner=COALESCE(owner, ?) WHERE id=? AND status!='done'",
+        (h, task_id),
+    )
+    conn.commit()
+    row = task_by_id(conn, task_id)
+    if row is None:
+        return ("missing", None)
+    return ("done", row)
+
+
+def list_tasks(conn, include_done: bool = False) -> list[sqlite3.Row]:
+    q = "SELECT * FROM tasks"
+    if not include_done:
+        q += " WHERE status != 'done'"
+    q += " ORDER BY id"
+    return conn.execute(q).fetchall()
+
+
+def agent_open_tasks(conn, handle: str) -> list[sqlite3.Row]:
+    """A handle's still-to-do tasks (owned, not yet done) — what the briefing surfaces
+    as 'Your task(s)' so an agent learns its slice without a human typing it in."""
+    h = (handle or "").strip().lower()
+    if not h:
+        return []
+    return conn.execute(
+        "SELECT * FROM tasks WHERE status != 'done' AND owner = ? ORDER BY id", (h,)
+    ).fetchall()
+
+
+def task_counts(conn) -> dict:
+    """``{open, claimed, done, total}`` — drives the dormant-until-used summaries."""
+    rows = conn.execute("SELECT status, COUNT(*) n FROM tasks GROUP BY status").fetchall()
+    by = {r["status"]: r["n"] for r in rows}
+    return {"open": by.get("open", 0), "claimed": by.get("claimed", 0),
+            "done": by.get("done", 0), "total": sum(by.values())}
+
+
+def _quote_span(text: str) -> str:
+    """Wrap ``text`` in a markdown code span for safe inlining into a chat body.
+    parse_mentions / _apply_human_guard / open_escalations all IGNORE code spans, so a
+    quoted ``@human`` / ``@someone`` inside it never pings, redirects, escalates, or
+    blocks anyone. Backticks in the text are flattened so they can't close the span
+    early and leak the tail back into routing."""
+    return "`" + (text or "").replace("`", "'") + "`"
+
+
+def assign_task(conn, handle: str, title: str, paths: str | None = None,
+                creator: str | None = None) -> int:
+    """Create a task already owned by ``handle`` AND @mention them, so an assignment is
+    both DURABLE (a ledger row that survives the 15-line chat scroll) and DELIVERED
+    (the mention rides the assignee's cursor / blocks their Stop). Works before the
+    assignee has even joined — the row waits in the ledger and the briefing surfaces
+    it on their first turn.
+
+    The assignee ``@h`` is the ONLY live mention; the free-text title/paths are quoted
+    into a code span so a title like ``ask @human about X`` can't open a phantom
+    escalation (which would wedge the lead-done gate), redirect to the lead, harvest a
+    spurious rule cite, or block an uninvolved third agent it happens to @mention. The
+    full, unquoted title still lives verbatim in the ledger row (and the briefing)."""
+    h = (handle or "").strip().lower()
+    if not h:
+        raise ValueError("assign needs a teammate handle")
+    if h in RESERVED_HANDLES:
+        raise ValueError(f"'{h}' is reserved and cannot be assigned a task")
+    tid = add_task(conn, title, paths=paths, creator=creator, owner=h, status="claimed")
+    send(conn, (creator or "system"),
+         f"@{h} [assignment] #{tid}: {_quote_span(title.strip())}"
+         + (f"  (files: {_quote_span(paths)})" if paths else ""),
+         kind="chat")
+    return tid
+
+
+def get_goal(conn) -> str | None:
+    """The one-line shared objective, or None when unset."""
+    g = get_meta(conn, "goal")
+    return g if (g or "").strip() else None
+
+
+def set_goal(conn, text: str) -> None:
+    """Set (or, with empty text, clear) the shared goal."""
+    text = (text or "").strip()
+    if not text:
+        del_meta(conn, "goal")
+        return
+    set_meta(conn, "goal", text)
+
+
+def _format_task(r) -> str:
+    owner = f"→@{r['owner']}" if r["owner"] else ""
+    paths = f"  ({r['paths']})" if r["paths"] else ""
+    return f"#{r['id']} [{r['status']}{owner}] {r['title']}{paths}"
 
 
 # --------------------------------------------------------------------------- #
@@ -1350,6 +1538,16 @@ def cmd_who(args):
         else:
             line = f"team: {n} active · {done} done"
         print(line)
+
+    # Coordination state — shown only when there is *live* work, so the roster goes
+    # quiet once everything is done (matching the briefing's dormancy; a lingering
+    # all-done tally would otherwise stick forever). `task list --all` still has it.
+    goal = get_goal(conn)
+    if goal:
+        print(f"goal: {goal}")
+    tc = task_counts(conn)
+    if tc["open"] or tc["claimed"]:
+        print(f"tasks: {tc['open']} open · {tc['claimed']} claimed · {tc['done']} done")
     conn.close()
 
 
@@ -1479,6 +1677,101 @@ def cmd_expect(args):
     return 0
 
 
+def cmd_task(args):
+    """Work-division ledger: add / list / claim / done. The durable substrate that
+    lets an agent learn its slice from the bus instead of a human typing it in, with
+    an atomic claim so two agents can't both grab the same task."""
+    conn = connect()
+    action = args.action
+    if action == "add":
+        title = " ".join(args.rest).strip() if args.rest else ""
+        if not title:
+            print('a task needs a title: task add "<what to do>"', file=sys.stderr)
+            conn.close(); return 1
+        tid = add_task(conn, title, paths=getattr(args, "paths", None),
+                       creator=getattr(args, "from_handle", None))
+        print(f"added task #{tid}: {title}"
+              + (f"  (files: {args.paths})" if getattr(args, "paths", None) else ""))
+        conn.close(); return 0
+    if action == "list":
+        rows = list_tasks(conn, include_done=args.all)
+        if not rows:
+            print("(no tasks)")
+        else:
+            for r in rows:
+                print(_format_task(r))
+            cnt = task_counts(conn)
+            print(f"— {cnt['open']} open · {cnt['claimed']} claimed · {cnt['done']} done")
+        conn.close(); return 0
+    # claim / done need an identity and a task id. Treat an out-of-SQLite-range id as
+    # simply missing (binding it would raise OverflowError → an ugly traceback).
+    if not (0 < args.id <= 2**63 - 1):
+        print(f"no task #{args.id}", file=sys.stderr); conn.close(); return 1
+    a = _resolve_for_cli(conn, args)
+    who = a["handle"] if a else getattr(args, "from_handle", None)
+    if action == "claim":
+        if not who:
+            print("who is claiming? pass --from <your handle>", file=sys.stderr)
+            conn.close(); return 1
+        result, row = claim_task(conn, args.id, who)
+        if result == "missing":
+            print(f"no task #{args.id}", file=sys.stderr); conn.close(); return 1
+        if result == "taken":
+            print(f"#{args.id} is already claimed by @{row['owner']} — coordinate in "
+                  f"chat before taking it.", file=sys.stderr)
+            conn.close(); return 1
+        if result == "done":
+            print(f"#{args.id} is already done.", file=sys.stderr)
+            conn.close(); return 1
+        print(f"claimed #{args.id} as @{who}: {row['title']}")
+        conn.close(); return 0
+    if action == "done":
+        result, _row = complete_task(conn, args.id, who)
+        if result == "missing":
+            print(f"no task #{args.id}", file=sys.stderr); conn.close(); return 1
+        print(f"marked task #{args.id} done")
+        conn.close(); return 0
+    print(f"unknown task action '{action}'", file=sys.stderr)
+    conn.close(); return 1
+
+
+def cmd_assign(args):
+    """Hand a specific teammate a task: create it already owned by them and @mention
+    them. Durable (a ledger row) + delivered (rides their cursor / blocks their Stop).
+    Sugar over ``task add`` + a notify, but in one race-free step."""
+    conn = connect()
+    a = _resolve_for_cli(conn, args)
+    creator = a["handle"] if a else getattr(args, "from_handle", None)
+    title = " ".join(args.title).strip() if args.title else ""
+    if not title:
+        print('assign needs a title: assign <handle> "<what to do>"', file=sys.stderr)
+        conn.close(); return 1
+    try:
+        tid = assign_task(conn, args.handle, title, paths=args.paths, creator=creator)
+    except ValueError as e:
+        print(str(e), file=sys.stderr); conn.close(); return 1
+    print(f"assigned #{tid} to @{args.handle.strip().lower()}: {title}")
+    conn.close(); return 0
+
+
+def cmd_goal(args):
+    """Show / set / clear the one-line shared objective every agent sees in its
+    briefing and in ``who``."""
+    conn = connect()
+    if getattr(args, "clear", False):
+        set_goal(conn, "")
+        print("goal cleared")
+        conn.close(); return 0
+    text = " ".join(args.text).strip() if args.text else ""
+    if not text:
+        g = get_goal(conn)
+        print(f"goal: {g}" if g else 'no goal set (`goal "<objective>"` to set one)')
+        conn.close(); return 0
+    set_goal(conn, text)
+    print(f"goal set: {text}")
+    conn.close(); return 0
+
+
 def cmd_rename(args):
     """Change your handle in place — keeps your session, history, and read cursor."""
     conn = connect()
@@ -1511,6 +1804,7 @@ def cmd_bootstrap(args):
     specs = args.spec or []
     method = args.method or _default_spawn_method()
     cwd = args.cwd or os.getcwd()
+    prompt_map: dict = {}
     if len(specs) == 1 and specs[0].isdigit():
         count = int(specs[0])
         if count < 1:
@@ -1519,7 +1813,14 @@ def cmd_bootstrap(args):
             return 1
         names = _pick_free_handles(conn, count)
     elif specs:
-        names = _pick_free_handles(conn, len(specs), explicit=specs)
+        # Each spec is a name or ``name:prompt`` — split off any per-agent prompt
+        # BEFORE handle resolution (the colon would otherwise be sanitized into the
+        # handle), then map the resolved handle (order-preserving) back to its prompt.
+        parsed = [_parse_spec(s) for s in specs]
+        names = _pick_free_handles(conn, len(parsed),
+                                   explicit=[p[0] for p in parsed])
+        prompt_map = {names[i]: parsed[i][1]
+                      for i in range(len(names)) if parsed[i][1]}
     else:
         print("specify how many teammates (e.g. `bootstrap 3`) or their names "
               "(e.g. `bootstrap frontend backend`).", file=sys.stderr)
@@ -1536,7 +1837,8 @@ def cmd_bootstrap(args):
     conn.close()
 
     results = spawn_agents(names, cwd, method=method, prompt=args.prompt,
-                           dry_run=args.dry_run, worktree=args.worktree)
+                           dry_run=args.dry_run, worktree=args.worktree,
+                           prompts=(prompt_map or None))
     only_printing = args.dry_run or method == "print"
     verb = "would spawn" if only_printing else "spawned"
     ok = sum(1 for r in results if r["ok"])
@@ -1558,9 +1860,14 @@ def cmd_bootstrap(args):
         size = n_active_before + ok
         conn = connect()
         set_team_size(conn, size)
+        if getattr(args, "goal", None):
+            set_goal(conn, args.goal)  # bootstrap IS team formation — record the goal
         conn.close()
         print(f"\nDeclared team size: {size} "
               f"(the barrier waits for the team; `expect N` to adjust).")
+        if getattr(args, "goal", None):
+            print(f"Shared goal: {args.goal} "
+                  "(every agent sees it in their briefing and `who`).")
         env_sz = (os.environ.get("GROUPCHAT_TEAM_SIZE") or "").strip()
         if env_sz:
             print(f"  note: $GROUPCHAT_TEAM_SIZE={env_sz} in your environment "
@@ -2386,6 +2693,34 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("new", help="your new handle (a-z, 0-9, '-', '_')")
     sp.set_defaults(func=cmd_rename)
 
+    sp = sub.add_parser("task", help="work-division ledger: add / list / claim / done")
+    tsub = sp.add_subparsers(dest="action", required=True)
+    ta = tsub.add_parser("add", help="add an open task to the ledger")
+    ta.add_argument("rest", nargs="+", help="task title")
+    ta.add_argument("--paths", help="optional path-glob hint (e.g. src/*.py)")
+    add_identity(ta)
+    tl = tsub.add_parser("list", help="list open + claimed tasks")
+    tl.add_argument("--all", action="store_true", help="include done tasks")
+    tc = tsub.add_parser("claim", help="claim an open task for yourself (atomic)")
+    tc.add_argument("id", type=int, help="task id (see `task list`)")
+    add_identity(tc)
+    tdn = tsub.add_parser("done", help="mark a task done")
+    tdn.add_argument("id", type=int, help="task id")
+    add_identity(tdn)
+    sp.set_defaults(func=cmd_task)
+
+    sp = sub.add_parser("assign", help="give a teammate a task (durable ledger row + @mention)")
+    add_identity(sp)
+    sp.add_argument("handle", help="teammate to assign to")
+    sp.add_argument("title", nargs="+", help="what to do")
+    sp.add_argument("--paths", help="optional path-glob hint")
+    sp.set_defaults(func=cmd_assign)
+
+    sp = sub.add_parser("goal", help="show / set / clear the shared objective")
+    sp.add_argument("text", nargs="*", help="objective text (omit to show)")
+    sp.add_argument("--clear", action="store_true", help="clear the goal")
+    sp.set_defaults(func=cmd_goal)
+
     sp = sub.add_parser("bootstrap", aliases=["team"],
                         help="spawn other Claude instances as named teammates")
     sp.add_argument("spec", nargs="*",
@@ -2394,6 +2729,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="how to launch (default: terminal on macOS, else print)")
     sp.add_argument("--cwd", help="working dir for spawned agents (default: cwd)")
     sp.add_argument("--prompt", help="initial prompt for each agent (default: none/idle)")
+    sp.add_argument("--goal", help="shared objective for the team (recorded in the room; "
+                                   "shown in every briefing and `who`)")
     sp.add_argument("--dry-run", action="store_true",
                     help="print the launch commands without spawning")
     sp.add_argument("--worktree", action="store_true",

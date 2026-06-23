@@ -217,6 +217,7 @@ EXPECTED = {
     "motions": {"id", "ts", "proposer", "target", "op", "change", "because",
                 "base_text", "new_id", "title", "status"},
     "votes": {"id", "ts", "motion_id", "voter_session", "voter_handle", "vote"},
+    "tasks": {"id", "ts", "title", "owner", "status", "paths", "creator"},
 }
 
 

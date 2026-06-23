@@ -4,6 +4,41 @@ All notable changes to **groupchat** — the coordination bus for parallel AI
 coding-agent sessions on one repo. Published as a Claude Code plugin in the
 `ikangai/claude-plugins` marketplace.
 
+## v0.6.0 — 2026-06-23
+
+### Work division — a durable task ledger (the chat room becomes a coordinator)
+- **`tasks` table + `task add/list/claim/done`.** Open vs claimed vs done work on the
+  bus, so an agent learns its slice from the chat instead of a human typing it into
+  each terminal. The **claim is atomic** (a status-guarded `UPDATE … WHERE
+  status='open'`): two agents racing for the same task → one wins, the loser is told
+  who holds it. Slash command **`/groupchat:task`**.
+- **`assign <handle> "…"`.** Hand a specific teammate a task — it creates the task
+  *already owned* by them **and** @mentions them, so an assignment is both **durable**
+  (a ledger row that outlives the chat scroll) and **delivered** (the mention rides
+  their cursor / blocks their Stop), even before they've joined. Free-text titles are
+  quoted so an `@human`/`@someone` inside a title can't mis-route or open a phantom
+  escalation.
+- **Shared `goal`.** A one-line objective (`goal "…"`, slash command
+  **`/groupchat:goal`**), auto-set by **`bootstrap --goal "…"`**, surfaced in every
+  briefing and `who` so a late or bootstrapped-idle joiner inherits the mission.
+- **Per-agent bootstrap prompts.** `bootstrap frontend:'build the UI' backend:'write
+  the API'` deals each agent its own initial task instead of one broadcast prompt.
+- All dormant-until-used: a room that never adds a task or sets a goal renders exactly
+  as before.
+
+### Coordination & bootstrap hardening — no deadlocks, solo never waits
+- **Solo agents don't wait.** A lone, undeclared agent settles only ~10s
+  (`GROUPCHAT_SOLO_GRACE`) instead of the full 90s startup grace.
+- **Declared teams can't hang.** A declared size that never fully assembles releases at
+  the 90s grace instead of the 2h ceiling; the startup guard now counts **active**
+  agents (not stale all-time rows), killing a ghost-row premature-exit on reused rooms.
+- **Bootstrap declares the team size** the moment it's known and polls who actually
+  joined; **`--worktree`** gives each spawned agent its own git worktree (branch
+  `groupchat/<name>`) so parallel edits can't collide, while one shared `chat.db` keeps
+  them in the same room.
+- **Instance-count awareness.** `who` and the briefing show live active/done/expected
+  counts; a genuine first join into a non-empty room posts a one-line notice.
+
 ## v0.5.0 — 2026-06-12
 
 ### Team bootstrap — spawn the rest of the team in one command

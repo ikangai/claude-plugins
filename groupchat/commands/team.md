@@ -13,6 +13,9 @@ Do this:
 2. Decide the team from `$ARGUMENTS`:
    - **A number** (e.g. `3`) → spawn that many auto-named teammates from the pool.
    - **Names** (e.g. `frontend backend qa`) → spawn exactly those, named so.
+   - **Names with per-agent prompts** (e.g. `frontend:'build the UI' backend:'write
+     the API'`) → spawn each with its OWN initial task instead of one shared prompt,
+     so the team starts divided-and-conquering immediately.
    - **Empty `$ARGUMENTS`:**
      - If there are **no other active agents**, ask me **how many teammates this
        repo needs**, then use that number.
@@ -26,8 +29,10 @@ Do this:
    opening anything, or `--method print` to just get commands to paste myself.
    Add `--worktree` if the teammates will edit code in parallel — each gets its own
    git worktree (branch `groupchat/<name>`) so their edits can't collide, while one
-   shared chat keeps them coordinating. Bootstrap records the team size so the
-   barrier is precise and nobody waits on a teammate who never came.
+   shared chat keeps them coordinating. Add `--goal "<objective>"` to record the
+   team's shared mission (every teammate sees it in their briefing and `who`).
+   Bootstrap records the team size so the barrier is precise and nobody waits on a
+   teammate who never came.
 4. Report the spawned roster. Tell me the new Terminal windows **are** my
    teammates — I can switch to any of them and start giving instructions, and each
    can `/rename` itself to something meaningful (e.g. `frontend`, `reviewer`).

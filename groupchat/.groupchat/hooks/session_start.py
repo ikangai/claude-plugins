@@ -66,6 +66,26 @@ def main():
     else:
         team_line = "Working solo — no team-barrier wait beyond a brief settle window."
 
+    # Coordination block — the shared goal, this agent's own assignments, and any
+    # unclaimed work. Dormant until used: a room with no goal and no tasks adds
+    # nothing here, so an unused room's briefing is byte-identical to before.
+    coord = []
+    try:
+        goal = chat.get_goal(conn)
+        if goal:
+            coord.append(f"Goal: {goal}")
+        mine = chat.agent_open_tasks(conn, handle)
+        if mine:
+            coord.append("Your task(s): " + "; ".join(
+                f"#{t['id']} {t['title']} [{t['status']}]" for t in mine))
+        counts = chat.task_counts(conn)
+        if counts["open"]:
+            coord.append(
+                f"Open tasks: {counts['open']} unclaimed — `chat.py task list` to see "
+                f"them, `chat.py task claim <id> --from {handle}` to take one.")
+    except Exception:
+        coord = []  # never let the coordinator surface break the briefing (fail-open)
+
     lines = [
         f"## Repo group chat — you are **{handle}**",
         "Several AI coding-agent sessions (Claude Code, Codex, opencode, …) may be "
@@ -78,6 +98,7 @@ def main():
         ("Active teammates: " + ", ".join(a["handle"] for a in others)) if others
         else "No other active agents right now (you may be first).",
         team_line,
+        *(([""] + coord) if coord else []),
         "",
         f'Post:    python3 "{path}" send --from {handle} "your message"',
         "Mention: include @handle in the text to ping a specific teammate",

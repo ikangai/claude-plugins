@@ -166,6 +166,51 @@ blocks). So `stop.py` keeps a finished agent alive until the *whole team* is don
   - `GROUPCHAT_SOLO_GRACE` — settle window for a lone, *undeclared* agent before its
     barrier may complete (default 10; `0` = exit at once, never wait).
 
+### The work-division layer (tasks, assignment, shared goal)
+
+The barrier and the briefing make a great chat *room*; this layer makes it a
+*coordinator*. It turns "a human alt-tabs to each terminal and types the slice" into
+durable bus state every agent can read. Like every other layer it is **dormant until
+used** — a room that never adds a task or sets a goal renders byte-identically (the
+`who`/briefing surfaces check for emptiness before printing).
+
+- **The `tasks` table** (`id, ts, title, owner, status, paths, creator`; added in
+  `_ensure_schema`, old dbs upgrade in place). One row = one slice of work, `status` ∈
+  `open | claimed | done`. CLI: `task add "<title>" [--paths <glob>]`, `task list
+  [--all]`, `task claim <id> --from <h>`, `task done <id> --from <h>`.
+- **The claim is atomic — the "two agents grab the same task" fix.** `claim_task` is a
+  status-guarded `UPDATE … WHERE id=? AND status='open'`; SQLite serializes the
+  writes, so of two racing claimers exactly one changes a row and wins — the loser
+  reads back the now-`claimed` row and is told who holds it (a non-zero exit a script
+  notices), never co-owning the slice. Re-claiming your own task is idempotent;
+  `complete_task` records the doer as owner even for a grab-and-finish.
+- **`assign <handle> "<title>"`** is the push half: `assign_task` creates a task
+  *already owned* by the assignee (`status='claimed'`) **and** `send()`s an `@<handle>
+  [assignment] #<id>: …` chat message. So an assignment is both **durable** (a ledger
+  row that outlives the 15-line chat scroll) and **delivered** (the @mention rides the
+  assignee's cursor / blocks their Stop) — and it lands even if the assignee hasn't
+  joined yet (the briefing surfaces `agent_open_tasks` on their first turn).
+- **The `goal` meta key** (`get_goal`/`set_goal`, sibling of `lead`/`team_size`) holds
+  the one-line shared objective. CLI: `goal` (show), `goal "<text>"` (set), `goal
+  --clear`. `bootstrap --goal "<text>"` records it automatically on a real launch
+  (same `not only_printing and ok>0` gate as the team-size declaration — a preview
+  sets nothing). Surfaced in every briefing (`Goal:` line) and `who`.
+- **Per-agent bootstrap prompts.** A spec is now `name` *or* `name:prompt` — `_parse_spec`
+  splits on the first colon (handles are `[a-z0-9_-]`, so a colon is unambiguous)
+  *before* handle resolution, and the resolved handle is mapped back to its prompt.
+  `spawn_agents(prompts={handle: text})` deals each agent its own initial task (a
+  handle absent from the map falls back to the uniform `--prompt`), so an orchestrator
+  can divide-and-conquer in one command instead of broadcasting one identical prompt.
+- **Surfacing.** `who` gains a `goal:` line and a `tasks: N open · K claimed · J done`
+  tally (only when non-empty); the SessionStart briefing shows the goal, the joining
+  agent's own `Your task(s):`, and an `Open tasks:` claim hint — all wrapped in a
+  fail-open `try` so a coordinator-surface error can never break the briefing (C2).
+
+This is Phase 1 of `docs/plans/2026-06-22-coordination-gap-analysis.md` (the
+chat-room→coordinator gap). Deferred to later phases: structured result fan-in
+(`kind='result'`), a control plane (`standdown`/`dismiss`/`direct`), a spawn-depth
+guard for autonomous spawning, and a `focus`/file-claim ledger.
+
 ### The leadership layer (hub-and-spoke `@human` routing)
 
 The flat room is exhausting for a human juggling N agents that each escalate
@@ -227,9 +272,19 @@ python3 .groupchat/chat.py rename --from ada frontend   # change your handle (ke
 # Team bootstrap — spawn the rest of the team, mapped to free handles
 python3 .groupchat/chat.py bootstrap 3            # open 3 teammates (pool-named) in new Terminal windows
 python3 .groupchat/chat.py bootstrap frontend qa  # ...or name them explicitly (alias: `team`)
+python3 .groupchat/chat.py bootstrap frontend:'build the UI' backend:'write the API'  # ...each with its own task
+python3 .groupchat/chat.py bootstrap 3 --goal "ship v1"   # record the team's shared objective
 python3 .groupchat/chat.py bootstrap 3 --dry-run  # preview the launch commands without spawning
 python3 .groupchat/chat.py bootstrap 2 --method print|tmux   # paste-yourself / tmux session instead of Terminal
 python3 .groupchat/chat.py bootstrap 3 --worktree # isolate each teammate in its own git worktree (no file collisions)
+
+# Work division — a durable task ledger + a shared goal (turns the room into a coordinator)
+python3 .groupchat/chat.py task add "write the lexer" --paths "src/lex/*.py" --from ada
+python3 .groupchat/chat.py task list              # open + claimed work (--all includes done)
+python3 .groupchat/chat.py task claim 2 --from ada    # atomically take an open task (loser is told who holds it)
+python3 .groupchat/chat.py task done 2 --from ada     # mark a task complete
+python3 .groupchat/chat.py assign frontend "build the error UI" --from ada   # hand @frontend a task (durable + @mention)
+python3 .groupchat/chat.py goal "ship v1"         # set/show/--clear the one-line shared objective
 
 # Leadership — hub-and-spoke @human routing (elected/emergent lead)
 python3 .groupchat/chat.py lead                   # show the current lead + how it resolved
@@ -341,8 +396,11 @@ and diary-promotion are deferred to P2.5; binding auto-apply is the deferred P4.
 ### Testing the system
 
 There is no test framework; verify by exercising the CLI and piping hook payloads.
-The constitution layer has dependency-free test scripts (each isolates via
-`GROUPCHAT_DIR`): `python3 tests/{constitution,cite_review,parliament}_test.py`.
+Dependency-free test scripts under `tests/` each isolate via `GROUPCHAT_DIR`; run them
+all with `python3 tests/run_all.py` (auto-discovers `*_test.py`). The work-division
+layer (tasks / assign / goal / per-agent bootstrap) is covered by
+`tests/tasks_test.py`; the constitution layer by
+`python3 tests/{constitution,cite_review,parliament}_test.py`.
 
 ```bash
 export GROUPCHAT_DIR=/tmp/gc_test          # isolate from the real room
@@ -364,6 +422,11 @@ channel. The SessionStart hook tells you your handle — use it:
 
 - **Announce before you act.** "Starting on `src/auth/handler.py`" prevents two
   agents editing the same file.
+- **Take a task before you work it.** If the room uses the task ledger (your briefing
+  shows a `Goal:` / `Your task(s):` / `Open tasks:` line), `task claim <id> --from
+  <you>` before starting — the claim is atomic, so if you lose the race you're told
+  who holds it; coordinate rather than double-work. Add work with `task add` / hand a
+  teammate a slice with `assign <handle> "..."`. `task done <id>` when finished.
 - **@mention** the specific agent when you need them; a plain message is a broadcast.
   Only @mentions block a teammate's Stop, so reserve them for things needing a reply.
 - **Answer mentions** — if your Stop hook surfaces an unanswered @mention, respond
