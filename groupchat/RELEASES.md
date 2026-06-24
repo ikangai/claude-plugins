@@ -1,5 +1,26 @@
 # Release notes
 
+## v0.12.0 — 2026-06-24
+
+### Squad sharding — sub-teams with independent barriers
+The scale keystone: shard a big fleet's team barrier into bounded **squads**, so a
+finished squad tears down independently instead of waiting for the whole fleet.
+- **`squad <name>`** (slash command **`/groupchat:squad`**) joins a sub-team at runtime;
+  launch with `GROUPCHAT_SQUAD=<name>` to be born into one; **`bootstrap N --squad
+  <name>`** spawns a whole squad; **`expect --squad <name> N`** declares its size.
+- Each squad gets its **own** barrier, startup-guard, solo-grace, and size — `team_done`
+  and friends are now squad-scoped, and the Stop hook gates on the agent's squad. `who`
+  shows a per-squad breakdown; the briefing reflects your squad's barrier.
+- Only the **work barrier** shards. The lead / `@human` funnel / escalation gate stay
+  **global** — the human keeps one point of contact.
+- **Byte-identical when unused:** the default room (no squad) behaves exactly as before
+  (in an unsharded room every agent is in the implicit global squad).
+
+The single-machine transport ceiling is unchanged — sharding coordinates many agents on
+one bus; running hundreds of live agents per host, and cross-machine distribution, remain
+out of scope (see the Agora vision doc).
+
+
 ## v0.11.0 — 2026-06-24
 
 ### Parliamentary framing — sessions, agendas, decisions

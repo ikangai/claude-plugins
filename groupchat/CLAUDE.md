@@ -128,6 +128,16 @@ blocks). So `stop.py` keeps a finished agent alive until the *whole team* is don
   non-hook teammate is still active — a non-hook host doesn't participate in the
   barrier protocol. ``--no-barrier`` is a one-way downgrade on re-register (a default
   refresh never re-upgrades `parks`).
+- **Squad sharding (the `squad` column).** The barrier is **per squad**: `team_done` /
+  `startup_guard_satisfied` / `cohort_age_seconds` / `expected_team_size` /
+  `set_team_size` take a `squad` (`None` = the default global room), and the Stop hook
+  gates on the agent's `squad`, so a finished sub-team tears down independently of the
+  rest of the fleet. Set via `$GROUPCHAT_SQUAD`, the `squad <name>` verb, or `bootstrap
+  --squad`; sizes are per-squad (`expect --squad <name> N`, key `team_size:<squad>`).
+  **Byte-identical when unused:** in an unsharded room every agent has `squad IS NULL`,
+  so `active_in_squad(conn, None)` *is* `active_agents(conn)`. Only the **work barrier**
+  shards — the lead / `@human` funnel / escalation gate stay **global** (one human
+  contact). Design: `docs/plans/2026-06-24-squad-sharding-design.md`.
 - **Startup guard** closes the ragged-startup race (a fast agent stopping before
   slower teammates have even registered → empty barrier → premature exit). It counts
   **active** agents (never all-time rows — a stale row from a prior run must not
@@ -376,6 +386,9 @@ python3 .groupchat/chat.py bootstrap 3 --goal "ship v1"   # record the team's sh
 python3 .groupchat/chat.py bootstrap 3 --dry-run  # preview the launch commands without spawning
 python3 .groupchat/chat.py bootstrap 2 --method print|tmux   # paste-yourself / tmux session instead of Terminal
 python3 .groupchat/chat.py bootstrap 3 --worktree # isolate each teammate in its own git worktree (no file collisions)
+python3 .groupchat/chat.py bootstrap 4 --squad frontend   # spawn a SUB-TEAM with its own barrier
+python3 .groupchat/chat.py squad frontend --from ada      # join a squad at runtime (its own barrier; global lead)
+python3 .groupchat/chat.py expect --squad frontend 4      # declare a squad's size
 
 # Work division — a durable task ledger + a shared goal (turns the room into a coordinator)
 python3 .groupchat/chat.py task add "write the lexer" --paths "src/lex/*.py" --from ada
@@ -547,7 +560,8 @@ spawn-guard) by `tests/control_plane_test.py`, the observability layer (focus / 
 claims / amber dot) by `tests/observability_test.py`, the correctness & mixed-fleet
 layer (escalation rename/handoff, barrier capability) by `tests/correctness_test.py`;
 the constitution layer by `python3 tests/{constitution,cite_review,parliament}_test.py`
-and the parliamentary framing (sessions/agendas/decisions) by `tests/sessions_test.py`.
+and the parliamentary framing (sessions/agendas/decisions) by `tests/sessions_test.py`;
+squad sharding (per-squad barriers) by `tests/squad_test.py`.
 
 ```bash
 export GROUPCHAT_DIR=/tmp/gc_test          # isolate from the real room
