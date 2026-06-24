@@ -196,6 +196,11 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             value TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_messages_id ON messages(id);
+        -- Speeds the kind-filtered chronological scans (the escalation gate, cite
+        -- harvest, last-chat lookup) so they're an index range, not a full-table scan —
+        -- the first thing that bites at dozens of agents on one bus (the Stop park loop
+        -- re-walks kind='chat' every ~2s). Additive; no behaviour change.
+        CREATE INDEX IF NOT EXISTS idx_messages_kind_id ON messages(kind, id);
         CREATE TABLE IF NOT EXISTS rule_cites (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             ts         TEXT    NOT NULL,
@@ -249,6 +254,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         _add_column_if_missing(conn, "agents", _col, "INTEGER NOT NULL DEFAULT 0")
     # Optional short heading for an add-motion's Article (else the (new rule) placeholder).
     _add_column_if_missing(conn, "motions", "title", "TEXT")
+    # Which parliamentary session a motion/decision-item belongs to (governance framing).
+    _add_column_if_missing(conn, "motions", "session_id", "TEXT")
     # Spawn lineage (Phase 3): how deep this agent was spawned and by whom — the
     # autonomous-spawn audit trail. Guarded so old dbs upgrade in place.
     _add_column_if_missing(conn, "agents", "spawn_depth", "INTEGER NOT NULL DEFAULT 0")
@@ -2087,6 +2094,10 @@ def cmd_who(args):
     cl = active_claims(conn)
     if cl:
         print("claims: " + "; ".join(f"@{c['handle']} {c['glob']}" for c in cl))
+    # Open parliamentary session, if any (governance framing; dormant otherwise).
+    ps = parl_session(conn)
+    if ps:
+        print(f"session: {ps['title']} ({len(agenda_items(conn, ps['id']))} open agenda item(s))")
     conn.close()
 
 
@@ -3168,6 +3179,123 @@ def motion_tally(conn, motion_id: int) -> dict:
             "detail": [(s, h, v) for s, (h, v) in last.items()]}
 
 
+# --------------------------------------------------------------------------- #
+# Parliamentary framing — sessions, agendas, decisions (binds NOTHING)
+# --------------------------------------------------------------------------- #
+# Connective tissue for the advisory parliament: a SESSION frames a bounded
+# deliberation, an AGENDA is its open items (reusing the motions table; op='decide'
+# for non-constitutional questions), and a DECISION is a kind='decision' RECORD of the
+# room's outcome. The load-bearing rule, enforced in code (cmd_ratify): a decision item
+# can NEVER reach the law — only a constitutional motion ratified by a human does. All
+# additive, dormant-until-used, riding the one cursor via kind='session'/'decision'.
+def parl_session(conn) -> dict | None:
+    """The open deliberation session, or None. Auto-expires after the active window so a
+    crashed opener can't leave a session open forever (mirrors ``standdown_active``). On
+    detecting a stale pointer it REAPS — expires that session's leftover open items and
+    clears the meta — so an abandoned session's decision items don't orphan into the
+    unscoped agenda (lazy GC, like ``_clear_stale_team_size`` on register)."""
+    oid = get_meta(conn, "parl_session")
+    if not oid:
+        return None
+    if iso_age_seconds(get_meta(conn, "parl_session_at")) >= ACTIVE_WINDOW_SECONDS:
+        conn.execute("UPDATE motions SET status='expired' "
+                     "WHERE session_id=? AND status='open'", (oid,))
+        del_meta(conn, "parl_session")
+        del_meta(conn, "parl_session_at")
+        del_meta(conn, "parl_session_title")
+        conn.commit()
+        return None
+    return {"id": oid, "title": get_meta(conn, "parl_session_title") or "",
+            "opened_at": get_meta(conn, "parl_session_at")}
+
+
+def open_parl_session(conn, sender: str, title: str) -> int:
+    """Open a session: post a ``kind='session'`` bookend (rides the cursor so every agent
+    and every late joiner learns it) and stamp the meta pointer. Returns the session id."""
+    title = " ".join((title or "").split())
+    mid = send(conn, sender, f"[session opened] {title}", kind="session")
+    set_meta(conn, "parl_session", str(mid))
+    set_meta(conn, "parl_session_at", now_iso())
+    set_meta(conn, "parl_session_title", title)
+    return mid
+
+
+def close_parl_session(conn, sender: str, summary: str | None = None) -> None:
+    """Close the open session: post a closing bookend, expire its leftover open agenda
+    items, and clear the meta pointer."""
+    s = parl_session(conn)
+    title = s["title"] if s else ""
+    sid = get_meta(conn, "parl_session")
+    send(conn, sender, f"[session closed] {title}" + (f" — {summary}" if summary else ""),
+         kind="session")
+    if sid:
+        conn.execute("UPDATE motions SET status='expired' "
+                     "WHERE session_id=? AND status='open'", (sid,))
+        conn.commit()
+    del_meta(conn, "parl_session")
+    del_meta(conn, "parl_session_at")
+    del_meta(conn, "parl_session_title")
+
+
+def add_decision_item(conn, sender: str, question: str, because: str,
+                      session_id: str | None = None) -> int:
+    """Add a non-constitutional agenda item (``op='decide'``) — a question for the room
+    to decide. Rides the motions table (so it's votable, supersede-able, and tallied) but
+    has NO CONSTITUTION.md target, so ``ratify`` refuses it: it can never become law."""
+    question = " ".join((question or "").split())
+    if not question:
+        raise ValueError("a decision item needs a question")
+    mid = send(conn, sender,
+               f"[decision item] {question}  (because: {because})", kind="motion")
+    conn.execute(
+        "INSERT INTO motions(id, ts, proposer, target, op, change, because, "
+        "base_text, new_id, title, status, session_id) "
+        "VALUES (?,?,?,?, 'decide', ?,?,?,?,?, 'open', ?)",
+        (mid, now_iso(), sender, question, None, because, None, None, None, session_id))
+    conn.commit()
+    return mid
+
+
+def agenda_items(conn, session_id: str | None = None) -> list[sqlite3.Row]:
+    """The open agenda — open motions (constitutional + decision items), optionally scoped
+    to a session."""
+    if session_id:
+        return conn.execute(
+            "SELECT * FROM motions WHERE status='open' AND session_id=? ORDER BY id",
+            (session_id,)).fetchall()
+    return conn.execute("SELECT * FROM motions WHERE status='open' ORDER BY id").fetchall()
+
+
+def record_decision(conn, sender: str, motion_id: int, outcome: str) -> tuple[int, str]:
+    """Record the room's outcome on a DECISION item as a ``kind='decision'`` RECORD —
+    advisory, queryable, inherited by the next cohort. Binds NOTHING and marks the item
+    'decided'. Returns ``(msg_id, status)``; status is 'recorded', 'missing', or
+    'not-a-decision' (a constitutional motion must be resolved by ``ratify``, not here —
+    keeping the law lane and the decision lane cleanly separate)."""
+    m = conn.execute("SELECT * FROM motions WHERE id=?", (motion_id,)).fetchone()
+    if not m:
+        return (0, "missing")
+    if m["op"] != "decide":
+        return (0, "not-a-decision")
+    if m["status"] != "open":
+        return (0, "already-resolved")  # already decided/expired/superseded — no dup record
+    t = motion_tally(conn, motion_id)
+    body = (f"[decision] M{motion_id} ({m['target']}): {' '.join((outcome or '').split())} "
+            f"(advisory tally — yea {t['yea']} / nay {t['nay']}, {t['voters']} voters; "
+            f"the room concluded this, it binds nothing)")
+    did = send(conn, sender, body, kind="decision")
+    conn.execute("UPDATE motions SET status='decided' WHERE id=?", (motion_id,))
+    conn.commit()
+    return (did, "recorded")
+
+
+def list_decisions(conn, limit: int | None = None) -> list[sqlite3.Row]:
+    q = "SELECT * FROM messages WHERE kind='decision' ORDER BY id ASC"
+    if limit:
+        q += f" LIMIT {int(limit)}"
+    return conn.execute(q).fetchall()
+
+
 def _motion_summary(op, target, new_id, change, because, proposer, title=None) -> str:
     head = {"amend": f"Motion: amend {target}",
             "repeal": f"Motion: repeal {target}",
@@ -3252,8 +3380,11 @@ def cmd_motion(args):
                               getattr(args, "title", None))
     mid = send(conn, proposer, summary,
                session_id=(a["session_id"] if a else None), kind="motion")
-    conn.execute("UPDATE motions SET status='superseded' WHERE target=? AND status='open'",
-                 (tgt_key,))
+    # Supersede only OTHER CONSTITUTIONAL motions on the same rule — never a decision
+    # item that happens to share the target string (a degenerate question like "R2").
+    # The law and decision lanes share the motions table but must not collide here.
+    conn.execute("UPDATE motions SET status='superseded' "
+                 "WHERE target=? AND status='open' AND op!='decide'", (tgt_key,))
     conn.execute(
         "INSERT INTO motions(id, ts, proposer, target, op, change, because, "
         "base_text, new_id, title, status) VALUES (?,?,?,?,?,?,?,?,?,?, 'open')",
@@ -3312,7 +3443,9 @@ def cmd_amendments(args):
     conn = connect()
     show_all = getattr(args, "all", False)
     rows = conn.execute("SELECT * FROM motions ORDER BY id DESC").fetchall()
-    rows = [m for m in rows if show_all or m["status"] == "open"]
+    # `amendments` is the CONSTITUTIONAL view — decision items (op='decide') live in
+    # `agenda` / `decisions`, never here (they can't be ratified).
+    rows = [m for m in rows if m["op"] != "decide" and (show_all or m["status"] == "open")]
     if not rows:
         print("no motions yet." if show_all else "no open motions.")
         return 0
@@ -3352,6 +3485,13 @@ def cmd_ratify(args):
         return 1
     if m["status"] in ("ratified", "superseded", "withdrawn"):
         print(f"M{mid} is {m['status']} — nothing to ratify", file=sys.stderr)
+        return 1
+    if m["op"] == "decide":
+        # The mechanical law/decision separation: a decision item never touches the
+        # constitution. It can only be RECORDED (advisory) via `decision`, never ratified.
+        print(f"M{mid} is a decision item, not a constitutional amendment — it binds "
+              f"nothing and cannot be ratified. Record its outcome with "
+              f'`decision M{mid} "..."`.', file=sys.stderr)
         return 1
     if re.fullmatch(r"C\d+", m["target"] or ""):
         print(f"{m['target']} is entrenched Core — cannot be ratified", file=sys.stderr)
@@ -3417,6 +3557,156 @@ def cmd_ratify(args):
           f"`ratify --confirm M{mid}` (records it + notifies the room), then apply the "
           f"diff above and `git commit` it.")
     return 0
+
+
+def cmd_session(args):
+    """Open / close / show a parliamentary session — a bounded deliberation window the
+    whole room (and late joiners) inherit. Binds nothing; pure framing."""
+    conn = connect()
+    action = getattr(args, "saction", None)
+    if action == "open":
+        if parl_session(conn):
+            cur = parl_session(conn)
+            print(f"a session is already open ('{cur['title']}') — `session close` first.",
+                  file=sys.stderr)
+            conn.close(); return 1
+        a = _resolve_for_cli(conn, args)
+        sender = a["handle"] if a else (args.from_handle or "anon")
+        title = " ".join(args.title).strip() if args.title else ""
+        if not title:
+            print("a session needs an agenda/title: session open \"<topic>\"", file=sys.stderr)
+            conn.close(); return 1
+        mid = open_parl_session(conn, sender, title)
+        print(f"session opened (#{mid}): {title}\n"
+              "Add items with `decide \"<question>\" --because ...`; record outcomes with "
+              "`decision M<id> \"...\"`; close with `session close`.")
+        conn.close(); return 0
+    if action == "close":
+        if not parl_session(conn):
+            print("no open session to close")
+            conn.close(); return 0
+        a = _resolve_for_cli(conn, args)
+        sender = a["handle"] if a else (args.from_handle or "anon")
+        summary = " ".join(args.summary).strip() if getattr(args, "summary", None) else None
+        close_parl_session(conn, sender, summary)
+        print("session closed (open agenda items expired).")
+        conn.close(); return 0
+    # show
+    s = parl_session(conn)
+    if not s:
+        print("(no open session)")
+        conn.close(); return 0
+    items = agenda_items(conn, s["id"])
+    print(f"session #{s['id']}: {s['title']}  ({len(items)} open agenda item(s))")
+    for m in items:
+        t = motion_tally(conn, m["id"])
+        kind = "decide" if m["op"] == "decide" else m["op"]
+        print(f"  M{m['id']} [{kind}] {m['target']}  — yea {t['yea']}/nay {t['nay']}")
+    conn.close(); return 0
+
+
+def cmd_decide(args):
+    """Put a non-constitutional question on the agenda — votable, but it can never become
+    law (use `motion` for constitutional amendments)."""
+    conn = connect()
+    a = _resolve_for_cli(conn, args)
+    sender = a["handle"] if a else (args.from_handle or "anon")
+    question = " ".join(args.question).strip() if args.question else ""
+    because = (args.because or "").strip()
+    if not question:
+        print('a decision needs a question: decide "<question>" --because "..."', file=sys.stderr)
+        conn.close(); return 1
+    if not because:
+        print("a decision needs evidence: pass --because '<message ids / context>'",
+              file=sys.stderr)
+        conn.close(); return 1
+    s = parl_session(conn)
+    mid = add_decision_item(conn, sender, question, because,
+                            session_id=(s["id"] if s else None))
+    print(f"decision item M{mid} added{' to the open session' if s else ''} (advisory). "
+          f"Vote with `vote --session <sid> M{mid} yea|nay`; the lead records the outcome "
+          f"with `decision M{mid} \"...\"`.")
+    conn.close(); return 0
+
+
+def cmd_agenda(args):
+    """Show the open agenda — motions + decision items, scoped to the open session if any."""
+    conn = connect()
+    s = parl_session(conn)
+    items = agenda_items(conn, s["id"] if s else None)
+    if s:
+        print(f"agenda — session #{s['id']}: {s['title']}")
+    if not items:
+        print("(no open agenda items)")
+        conn.close(); return 0
+    for m in items:
+        t = motion_tally(conn, m["id"])
+        kind = "decide" if m["op"] == "decide" else m["op"]
+        print(f"  M{m['id']} [{kind}] {m['target']}  — yea {t['yea']}/nay {t['nay']} "
+              f"({t['voters']} voters) · because: {m['because']}")
+    conn.close(); return 0
+
+
+def cmd_decision(args):
+    """[lead/operator] Record the room's outcome on a decision item — an advisory
+    `kind='decision'` RECORD that binds nothing (only `ratify` + a human commit changes
+    the law)."""
+    conn = connect()
+    ok, caller, lead = _control_caller_ok(conn, args)
+    if not ok:
+        print(f"only the lead (@{lead}) or the operator records decisions (you are "
+              f"@{caller}).", file=sys.stderr)
+        conn.close(); return 1
+    mid = _parse_motion_id(args.motion)
+    if mid is None:
+        print(f"bad motion id {args.motion!r}", file=sys.stderr)
+        conn.close(); return 1
+    outcome = " ".join(args.outcome).strip() if args.outcome else ""
+    if not outcome:
+        print('a decision needs an outcome: decision M<id> "<what the room concluded>"',
+              file=sys.stderr)
+        conn.close(); return 1
+    did, status = record_decision(conn, caller or "operator", mid, outcome)
+    if status == "missing":
+        print(f"no motion M{mid}", file=sys.stderr); conn.close(); return 1
+    if status == "not-a-decision":
+        print(f"M{mid} is a constitutional motion — resolve it with `ratify`, not "
+              f"`decision` (decisions are for `decide` items).", file=sys.stderr)
+        conn.close(); return 1
+    if status == "already-resolved":
+        print(f"M{mid} is already resolved (decided/expired) — not recording a duplicate.",
+              file=sys.stderr)
+        conn.close(); return 1
+    print(f"decision recorded (#{did}) for M{mid} — advisory, binds nothing.")
+    conn.close(); return 0
+
+
+def cmd_decisions(args):
+    """List the room's recorded decisions (the inheritance trail)."""
+    conn = connect()
+    rows = list_decisions(conn)
+    if not rows:
+        print("(no decisions recorded yet)")
+    else:
+        for r in rows:
+            print(f"#{r['id']} {_hhmm(r['ts'])} {r['sender']}: {r['body']}")
+        print(f"— {len(rows)} decision(s)")
+    conn.close(); return 0
+
+
+def cmd_audit(args):
+    """Read-only deliberation trail — sessions, motions, votes, and decisions in order
+    (the transparency / judicial view; changes nothing)."""
+    conn = connect()
+    rows = conn.execute(
+        "SELECT id, ts, sender, kind, body FROM messages "
+        "WHERE kind IN ('session','motion','vote','decision') ORDER BY id ASC").fetchall()
+    if not rows:
+        print("(no deliberation on record)")
+        conn.close(); return 0
+    for r in rows:
+        print(f"#{r['id']} {_hhmm(r['ts'])} [{r['kind']}] {r['sender']}: {r['body']}")
+    conn.close(); return 0
 
 
 def cmd_doctor(args):
@@ -3674,6 +3964,40 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--confirm", action="store_true",
                     help="mark ratified + notify the team (run BEFORE applying the diff); then apply + git commit")
     sp.set_defaults(func=cmd_ratify)
+
+    # Parliamentary framing — sessions / agendas / decisions (advisory; binds nothing).
+    sp = sub.add_parser("session", help="open / close / show a deliberation session")
+    ssub = sp.add_subparsers(dest="saction")
+    so = ssub.add_parser("open", help="open a deliberation session")
+    so.add_argument("title", nargs="+", help="the session's agenda / topic")
+    add_identity(so)
+    scl = ssub.add_parser("close", help="close the open session")
+    scl.add_argument("--summary", nargs="*", help="optional closing summary")
+    add_identity(scl)
+    ssub.add_parser("show", help="show the open session + agenda")  # bare `session` too
+    sp.set_defaults(func=cmd_session, saction=None)
+
+    sp = sub.add_parser("decide", help="put a non-constitutional question on the agenda (votable)")
+    add_identity(sp)
+    sp.add_argument("question", nargs="+", help="the question to decide")
+    sp.add_argument("--because", required=True, help="evidence: message ids / context")
+    sp.set_defaults(func=cmd_decide)
+
+    sp = sub.add_parser("agenda", help="show the open agenda (motions + decision items)")
+    sp.set_defaults(func=cmd_agenda)
+
+    sp = sub.add_parser("decision",
+                        help="[lead/operator] record the room's outcome on a decision item")
+    add_identity(sp)
+    sp.add_argument("motion", help="the decision item's id, e.g. M12")
+    sp.add_argument("outcome", nargs="+", help="what the room concluded")
+    sp.set_defaults(func=cmd_decision)
+
+    sp = sub.add_parser("decisions", help="list the room's recorded decisions")
+    sp.set_defaults(func=cmd_decisions)
+
+    sp = sub.add_parser("audit", help="read-only deliberation trail (sessions/motions/votes/decisions)")
+    sp.set_defaults(func=cmd_audit)
 
     return p
 

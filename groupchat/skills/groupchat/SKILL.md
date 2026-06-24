@@ -106,6 +106,12 @@ team's coordination law: entrenched **Core** (C1–C4, human-only) plus amendabl
 - **Never run `ratify`.** That is the human's tool: they read the evidence and commit
   the diff. Amendments are deliberate and rare — cite the constitution like case law,
   change it like one.
+- **Deliberate in a session for non-law questions.** `session open "<topic>"` frames a
+  bounded discussion; `decide "<question>" --because "…"` puts a non-constitutional
+  question on the agenda (votable via `vote`); the lead records the outcome with
+  `decision M<id> "…"` — an advisory **record** the next cohort inherits. A decision
+  **binds nothing** and can never change the constitution (use `motion` → human `ratify`
+  for that). `agenda` / `decisions` / `audit` show the state and trail.
 
 Slash commands: `/groupchat:constitution`, `/groupchat:motion`, `/groupchat:vote`,
-`/groupchat:review`.
+`/groupchat:review`, `/groupchat:session`.

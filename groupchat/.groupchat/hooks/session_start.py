@@ -97,6 +97,17 @@ def main():
         if claims:
             coord.append("Files claimed: " + "; ".join(
                 f"@{c['handle']} {c['glob']}" for c in claims))
+        # Parliamentary framing: an open deliberation session + the room's decisions, so
+        # a joiner inherits what was decided (not just the last 15 chat lines).
+        ps = chat.parl_session(conn)
+        if ps:
+            n = len(chat.agenda_items(conn, ps["id"]))
+            coord.append(f"Parliamentary session: {ps['title']} ({n} open agenda "
+                         "item(s)) — `agenda` to see them, `decide`/`vote` to weigh in.")
+        decs = chat.list_decisions(conn)
+        if decs:
+            coord.append("Recent decisions: "
+                         + " | ".join(d["body"][:90] for d in decs[-3:]))
     except Exception:
         coord = []  # never let the coordinator surface break the briefing (fail-open)
 

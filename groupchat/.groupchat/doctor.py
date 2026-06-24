@@ -216,7 +216,7 @@ EXPECTED = {
     "meta": {"key", "value"},
     "rule_cites": {"id", "ts", "rule_id", "sender", "message_id"},
     "motions": {"id", "ts", "proposer", "target", "op", "change", "because",
-                "base_text", "new_id", "title", "status"},
+                "base_text", "new_id", "title", "status", "session_id"},
     "votes": {"id", "ts", "motion_id", "voter_session", "voter_handle", "vote"},
     "tasks": {"id", "ts", "title", "owner", "status", "paths", "creator"},
     "claims": {"id", "ts", "session_id", "handle", "glob"},
