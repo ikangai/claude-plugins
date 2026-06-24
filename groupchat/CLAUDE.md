@@ -420,8 +420,16 @@ python3 .groupchat/chat.py constitution           # show core + articles (alias:
 python3 .groupchat/chat.py review                 # repeal-first review: dead/rarely-cited rules (advisory)
 python3 .groupchat/chat.py motion --from ada --rule R2 --change "..." --because "<evidence>"
 python3 .groupchat/chat.py vote --session <id> M12 yea   # advisory; registered session only
-python3 .groupchat/chat.py amendments             # open motions + advisory tallies
+python3 .groupchat/chat.py amendments             # open CONSTITUTIONAL motions + advisory tallies
 python3 .groupchat/chat.py ratify M12             # human: evidence dossier + a diff to commit (diff-only)
+
+# Parliamentary framing — sessions / agendas / decisions (advisory; binds nothing)
+python3 .groupchat/chat.py session open "rework the auth module" --from ada   # a deliberation window
+python3 .groupchat/chat.py decide "adopt ruff?" --because "perf, 0 config" --from ada   # a non-law agenda item
+python3 .groupchat/chat.py agenda                 # open agenda items + advisory tallies
+python3 .groupchat/chat.py decision M7 "yes, repo-wide" --from ada   # [lead] record the outcome (advisory)
+python3 .groupchat/chat.py decisions              # the inherited decision trail (audit: full trail)
+python3 .groupchat/chat.py session close --from ada
 
 # Setup / portability
 python3 .groupchat/chat.py init                   # create the db
@@ -504,6 +512,21 @@ Three layers:
   guard, prints an evidence dossier + a unified diff (**diff-only — never writes the
   file**, C1), and posts a `system` message so live agents learn via the cursor.
 
+- **P3.5 — parliamentary framing (sessions / agendas / decisions).** Connective tissue
+  for the advisory parliament; binds nothing. A **`session`** is a bounded deliberation
+  window (`meta['parl_session']` + `kind='session'` bookends, auto-expiring after the
+  active window like `standdown`; `parl_session` **reaps** a stale session's open items).
+  An **agenda** reuses the `motions` table — non-constitutional questions are a new
+  **`op='decide'`** (no `CONSTITUTION.md` target). A **`decision`** is a `kind='decision'`
+  RECORD of the room's outcome (lead/operator-gated), inherited by the next cohort via the
+  cursor; `decisions`/`audit` surface the trail. **The mechanical law/decision
+  separation:** `ratify` refuses any `op='decide'` motion and `record_decision` cannot
+  call `_apply_amendment`, so a decision can *never* reach the constitution — the only
+  path to law stays `ratify --confirm` + a human commit (C1). `amendments` is the
+  constitutional-only view (excludes `op='decide'`). Design + review:
+  `docs/plans/2026-06-24-parliamentary-sessions-design.md` (vision:
+  `docs/plans/2026-06-24-from-groupchat-to-agora-vision.md`).
+
 **The vote never enacts a change** — a human ratifies from verifiable evidence; the
 tally is one weak input. Threat model (homogeneous-fleet capture, herd voting,
 unauthenticated `--from`) and full rationale:
@@ -523,7 +546,8 @@ layer (tasks / assign / goal / per-agent bootstrap) is covered by
 spawn-guard) by `tests/control_plane_test.py`, the observability layer (focus / cwd /
 claims / amber dot) by `tests/observability_test.py`, the correctness & mixed-fleet
 layer (escalation rename/handoff, barrier capability) by `tests/correctness_test.py`;
-the constitution layer by `python3 tests/{constitution,cite_review,parliament}_test.py`.
+the constitution layer by `python3 tests/{constitution,cite_review,parliament}_test.py`
+and the parliamentary framing (sessions/agendas/decisions) by `tests/sessions_test.py`.
 
 ```bash
 export GROUPCHAT_DIR=/tmp/gc_test          # isolate from the real room
