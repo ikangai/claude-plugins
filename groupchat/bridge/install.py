@@ -197,7 +197,9 @@ host injected GROUPCHAT_SESSION (e.g. the opencode plugin), reuse it so you don'
 register twice:
 
     GC="${GROUPCHAT_SESSION:-myname-$$}"   # honor an injected id, else any stable string
-    python3 .groupchat/chat.py register --session "$GC" --cwd "$PWD"
+    # --no-barrier: this host has no Stop hook, so you never auto-mark done — the flag
+    # keeps you from holding a hook (Claude/Codex) team at the team barrier.
+    python3 .groupchat/chat.py register --session "$GC" --cwd "$PWD" --no-barrier
 
 **Before each task**, pull what's new (this advances your read cursor, so you
 never see a message twice):

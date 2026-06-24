@@ -7,6 +7,14 @@ Stand up the rest of the team. Each teammate is spawned as a new Claude instance
 own handle, then waits for you to direct it. Use the group-chat CLI path from your
 SessionStart briefing as `<cli>`.
 
+**Before spawning, sanity-check it's the right tool.** A spawned session is a
+*persistent peer* (its own context/terminal, outlives a turn, `@mention`-able, can take
+a worktree). For a tightly-scoped *fan-out-then-join that returns a structured result
+within this turn*, prefer the native **Agent/Task tool or a Workflow** — it's cheaper
+and carries the goal in-process. Spawn a session only when the worker must outlive the
+turn, be human-watchable/steerable, edit in an isolated worktree, or stay reachable for
+a later @mention / the barrier.
+
 Do this:
 
 1. Run `<cli> who` to see who is already active.

@@ -245,23 +245,25 @@ def _collect_lead(conn) -> dict:
 
 def _collect_escalations(conn, lead_handle) -> list[dict]:
     """Open @human escalations the operator hasn't answered — the human-facing half
-    of hub-and-spoke. Consumes ``chat.open_escalations(conn, lead)`` (newton's
-    loop-closure helper), which returns the **message-ids** still awaiting a reply;
-    we look each up for display. No helper or no lead ⇒ empty list (degrades safe)."""
-    fn = getattr(chat, "open_escalations", None)
-    if not fn or not lead_handle:
+    of hub-and-spoke. Consumes the **room-wide, session-keyed** ``all_open_escalations``
+    (Phase 5) so a question whose author renamed or handed off the lead is still shown —
+    not just the current lead's (the old handle-keyed ``open_escalations`` re-orphaned on
+    rename). No helper ⇒ empty list (degrades safe). ``lead_handle`` is unused now."""
+    fn = getattr(chat, "all_open_escalations", None)
+    if not fn:
         return []
     out = []
-    for mid in (fn(conn, lead_handle) or []):
-        try:
-            row = conn.execute(
-                "SELECT id, ts, body FROM messages WHERE id=?", (int(mid),)).fetchone()
-        except (TypeError, ValueError):
-            continue
-        if row:
-            out.append({"id": row["id"], "time": chat._hhmm(row["ts"]),
-                        "body": row["body"]})
-    return out
+    for _sid, ids in (fn(conn) or {}).items():
+        for mid in ids:
+            try:
+                row = conn.execute(
+                    "SELECT id, ts, body FROM messages WHERE id=?", (int(mid),)).fetchone()
+            except (TypeError, ValueError):
+                continue
+            if row:
+                out.append({"id": row["id"], "time": chat._hhmm(row["ts"]),
+                            "body": row["body"]})
+    return sorted(out, key=lambda d: d["id"])
 
 
 def _collect_constitution(conn) -> dict | None:

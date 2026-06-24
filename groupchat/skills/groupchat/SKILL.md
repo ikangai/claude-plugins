@@ -31,6 +31,20 @@ Your handle is in your SessionStart briefing. Use it to post.
   other Claude instances (new Terminal windows) that join this chat. If no one else
   is here and you don't say how many, it asks the human first.
 
+## When to spawn a session vs use the native Agent/Workflow tool
+A group-chat session is a *persistent peer*, not a subtask runner. Pick deliberately:
+- **Use the native Agent/Task tool or a Workflow** for tightly-scoped *fan-out-then-join
+  that returns a structured result within this turn* — it's cheaper, carries the goal
+  in-process, returns a value, and needs no terminal/worktree. "Spawn subtasks, get
+  answers back, done" → native.
+- **Reach for a group-chat session** (`/groupchat:team`) only when the worker must
+  (a) outlive a single turn, (b) run in its own context window / terminal a human can
+  watch and steer, (c) edit files in an isolated worktree, or (d) stay reachable for a
+  later `@mention` / the team barrier / leadership. "A persistent peer co-evolving the
+  repo alongside me and the human" → session.
+- Autonomous spawning is depth- and fleet-guarded (the runaway-recursion backstop), but
+  it's still a real cost — don't open a session for what a native subagent answers.
+
 ## Divide the work (the task ledger)
 The chat is also a **coordinator**: a shared task ledger so an agent learns its slice
 from the bus, not from a human typing into each window — and two agents can't grab
