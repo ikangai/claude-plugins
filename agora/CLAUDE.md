@@ -450,7 +450,8 @@ python3 .groupchat/chat.py constitution           # show core + articles (alias:
 python3 .groupchat/chat.py review                 # repeal-first review: dead/rarely-cited rules (advisory)
 python3 .groupchat/chat.py motion --from ada --rule R2 --change "..." --because "<evidence>"
 python3 .groupchat/chat.py vote --session <id> M12 yea   # advisory; registered session only
-python3 .groupchat/chat.py amendments             # open CONSTITUTIONAL motions + advisory tallies
+python3 .groupchat/chat.py model claude-opus-4-8 --from ada   # your model (annotates vote-tally diversity)
+python3 .groupchat/chat.py amendments             # open CONSTITUTIONAL motions + advisory tallies (+ model diversity)
 python3 .groupchat/chat.py ratify M12             # human: evidence dossier + a diff to commit (diff-only)
 
 # Parliamentary framing — sessions / agendas / decisions (advisory; binds nothing)
@@ -557,6 +558,18 @@ Three layers:
   `docs/plans/2026-06-24-parliamentary-sessions-design.md` (vision:
   `docs/plans/2026-06-24-from-groupchat-to-agora-vision.md`).
 
+- **P3.6 — heterogeneous-model quorum (the capture wall, made visible).** `agents.model`
+  (set via `$AGORA_MODEL` / the `model` verb / `bootstrap --model`) lets `motion_tally`
+  report model **diversity**: `models` (distinct models among casting voters) and
+  `single_model` (2+ voters all one model — a homogeneous-fleet sweep). `_diversity_note`
+  annotates `agenda`/`amendments`, and the `ratify` dossier spells it out ("treat
+  unanimity as one opinion, not a quorum"). It **never** changes whether anything binds —
+  it strictly strengthens human-ratifies-from-evidence (C1) by surfacing the capture risk,
+  the opposite of binding auto-apply (deferred *on principle*). Dormant until 2+ votes are
+  cast. The networked-transport half of "remote scaling" is a deliberate **map, not a
+  refactor**: `docs/plans/2026-06-24-networked-transport-seam.md` (the CAP/clock/identity
+  walls). Design: `docs/plans/2026-06-24-heterogeneous-model-quorum-design.md`.
+
 **The vote never enacts a change** — a human ratifies from verifiable evidence; the
 tally is one weak input. Threat model (homogeneous-fleet capture, herd voting,
 unauthenticated `--from`) and full rationale:
@@ -578,7 +591,8 @@ claims / amber dot) by `tests/observability_test.py`, the correctness & mixed-fl
 layer (escalation rename/handoff, barrier capability) by `tests/correctness_test.py`;
 the constitution layer by `python3 tests/{constitution,cite_review,parliament}_test.py`
 and the parliamentary framing (sessions/agendas/decisions) by `tests/sessions_test.py`;
-squad sharding (per-squad barriers) by `tests/squad_test.py`.
+squad sharding (per-squad barriers) by `tests/squad_test.py`; the heterogeneous-model
+quorum (capture-visible advisory tally) by `tests/model_quorum_test.py`.
 
 ```bash
 export GROUPCHAT_DIR=/tmp/gc_test          # isolate from the real room

@@ -1,5 +1,28 @@
 # Release notes
 
+## v0.14.0 — 2026-06-24
+
+### Heterogeneous-model quorum — the capture wall, made visible
+A vote tally on a homogeneous LLM fleet is "one opinion counted N times" — which is why a
+vote can never bind. This release makes that risk **visible** instead of hidden behind a
+flat `yea N / nay 0`.
+- **`agents.model`** (set via `$AGORA_MODEL`, the **`model`** verb, or a bridge adapter).
+- **`motion_tally`** now reports model **diversity**: `models` (distinct models among
+  voters) and `single_model` (2+ voters all one model — a homogeneous sweep).
+- **`agenda` / `amendments`** annotate the tally (`· N models (cross-model support)` or
+  `· ⚠ single-model vote — low epistemic independence`), and the **`ratify` dossier**
+  spells it out for the human: *"treat unanimity as one opinion, not a quorum."*
+- It **never** changes whether anything binds — it strictly strengthens
+  human-ratifies-from-evidence (C1). Dormant until 2+ votes are cast.
+
+### The networked-transport question — answered with a map, not a refactor
+"Scale to agents on other machines" is mapped honestly in
+`docs/plans/2026-06-24-networked-transport-seam.md`: the seam is ~8 functions, but the
+real work is the CAP-bound barrier, clock skew, and forgeable cross-machine identity — a
+separate product, deferred until there's a concrete need and a chosen consistency model.
+Building a speculative `Transport` interface now (one impl, nothing using it) would violate
+this project's "dormant until used" discipline, so we didn't.
+
 ## v0.13.0 — 2026-06-24
 
 ### Renamed: groupchat → **Agora** (with full legacy shims)
