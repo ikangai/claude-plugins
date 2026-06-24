@@ -79,6 +79,12 @@ def main():
     agent = chat.agent_by_session(conn, sid)
     if not agent:
         return  # not registered -> nothing to coordinate, allow stop
+    # This agent's squad scopes its barrier — a finished squad tears down independently;
+    # None (the default room) is the whole fleet, byte-identical when unsharded.
+    try:
+        squad = agent["squad"]
+    except (IndexError, KeyError):
+        squad = None
     chat.register(conn, sid)  # refresh last-seen
 
     # Meter token usage for this session (best-effort; never blocks a stop).
@@ -120,7 +126,7 @@ def main():
 
     # 3. Barrier: exit only when the whole team is done AND we owe the operator
     #    nothing. An awaiting lead keeps the team up so no answer is lost.
-    if not awaiting_operator and chat.team_done(conn):
+    if not awaiting_operator and chat.team_done(conn, squad):
         chat.del_meta(conn, park_key)
         return  # allow stop — everyone is finished
 
@@ -148,7 +154,7 @@ def main():
             return
 
         # The last teammate finished -> release together.
-        if chat.team_done(conn):
+        if chat.team_done(conn, squad):
             chat.del_meta(conn, park_key)
             return  # allow stop
 
@@ -172,18 +178,19 @@ def main():
             "then the team stays up. You may stop (you'll keep waiting)."
         )
     else:
-        waiting = [a["handle"] for a in chat.active_agents(conn)
+        sq_label = f" (squad {squad})" if squad else ""
+        waiting = [a["handle"] for a in chat.active_in_squad(conn, squad)
                    if (a["status"] or "") != chat.DONE_STATUS]
         if waiting:
             reason = (
-                f"Still waiting at the team barrier — {', '.join(waiting)} not "
+                f"Still waiting at the team barrier{sq_label} — {', '.join(waiting)} not "
                 "finished yet. Nothing for you to do; you may stop (you'll keep waiting)."
             )
         else:
             # Everyone present is done but the guard isn't satisfied yet — we're
             # still assembling. Say so, rather than blaming absent "teammates".
-            size = chat.expected_team_size(conn)
-            n_active = len(chat.active_agents(conn))
+            size = chat.expected_team_size(conn, squad)
+            n_active = len(chat.active_in_squad(conn, squad))
             if size and n_active < size:
                 reason = (
                     f"Still assembling the team — {n_active}/{size} agents have "

@@ -24,6 +24,11 @@ Your handle is in your SessionStart briefing. Use it to post.
   if a teammate @mentions you. Don't poll or spin to stay available.
 - **Declare team size early** if you know it: `chat.py expect N` (or launch with
   `GROUPCHAT_TEAM_SIZE=N`). Otherwise a 90s startup grace applies.
+- **Shard a big fleet into squads.** A `squad` is a sub-team with its **own barrier**, so
+  it finishes independently (the lead / `@human` funnel stays global). Join with `squad
+  <name>` (or launch with `GROUPCHAT_SQUAD=<name>`); spawn one with `bootstrap N --squad
+  <name>`; size it with `expect --squad <name> N`. The default room (no squad) is
+  unchanged.
 - **Rename yourself for clarity** with `/groupchat:rename <new-name>` (or
   `rename --from <you> <new-name>`) — turn a pool name into a role (`frontend`,
   `reviewer`). Your session, history, and read cursor carry over.
@@ -89,7 +94,7 @@ Slash commands `/groupchat:who`, `/groupchat:chat`, `/groupchat:inbox`,
 `/groupchat:tokens`, `/groupchat:rename`, `/groupchat:team`, `/groupchat:task`,
 `/groupchat:goal`, `/groupchat:result`, `/groupchat:summary`, `/groupchat:harvest`,
 `/groupchat:direct`, `/groupchat:dismiss`, `/groupchat:standdown`, `/groupchat:focus`,
-`/groupchat:claims` wrap these.
+`/groupchat:claims`, `/groupchat:squad` wrap these.
 
 ## Governance — the constitution (if this repo has one)
 If a `CONSTITUTION.md` exists (your SessionStart briefing points at it), it is the

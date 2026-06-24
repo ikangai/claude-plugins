@@ -266,6 +266,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # parks (Claude, Codex), 0 for a non-hook host (opencode/generic) that never marks
     # done — so a hook-less agent can't hold a hook team at the barrier. Default 1.
     _add_column_if_missing(conn, "agents", "parks", "INTEGER NOT NULL DEFAULT 1")
+    # Sub-team sharding: which SQUAD an agent belongs to (NULL = the single global room).
+    # The team BARRIER scopes per squad so a finished squad tears down independently; the
+    # lead / @human funnel stays global. Set via $GROUPCHAT_SQUAD / `squad` / bootstrap.
+    _add_column_if_missing(conn, "agents", "squad", "TEXT")
     conn.execute(
         "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -518,11 +522,11 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
         try:
             conn.execute(
                 "INSERT INTO agents(session_id, handle, cwd, pid, status, "
-                "first_seen, last_seen, last_read_id, spawn_depth, spawned_by, parks) "
-                "VALUES (?,?,?,?,?,?,?, (SELECT COALESCE(MAX(id),0) FROM messages), ?, ?, ?)",
+                "first_seen, last_seen, last_read_id, spawn_depth, spawned_by, parks, squad) "
+                "VALUES (?,?,?,?,?,?,?, (SELECT COALESCE(MAX(id),0) FROM messages), ?, ?, ?, ?)",
                 (session_id, h, cwd, pid, status, ts, ts,
                  current_spawn_depth(), os.environ.get("GROUPCHAT_SPAWNED_BY") or None,
-                 1 if parks else 0),
+                 1 if parks else 0, _norm_squad(os.environ.get("GROUPCHAT_SQUAD"))),
             )
             conn.commit()
             _clear_stale_team_size(conn, session_id)
@@ -622,6 +626,21 @@ def active_agents(conn) -> list[sqlite3.Row]:
     return [r for r in rows if _is_active(r["last_seen"])]
 
 
+def _norm_squad(name: str | None) -> str | None:
+    """Sanitize a squad name to ``[a-z0-9_-]`` (like a handle); empty → None (the default
+    global room). So a NULL squad and an unset/blank ``$GROUPCHAT_SQUAD`` are the same."""
+    s = re.sub(r"[^a-z0-9_-]", "", (name or "").strip().lower())
+    return s or None
+
+
+def active_in_squad(conn, squad: str | None) -> list[sqlite3.Row]:
+    """Active agents in ``squad`` (``None`` = the default global room). In an UNSHARDED
+    room every agent has ``squad IS NULL``, so ``active_in_squad(conn, None)`` is exactly
+    ``active_agents(conn)`` — which is what keeps the barrier byte-identical when unused."""
+    sq = _norm_squad(squad) if isinstance(squad, str) else squad
+    return [a for a in active_agents(conn) if (a["squad"] or None) == sq]
+
+
 # --------------------------------------------------------------------------- #
 # Team bootstrap — spawn other agent sessions, mapped to free handles
 # --------------------------------------------------------------------------- #
@@ -696,16 +715,18 @@ def _default_spawn_method() -> str:
 
 
 def _spawn_command(name: str, cwd: str, prompt: str | None,
-                   depth: int = 0, spawned_by: str | None = None) -> str:
+                   depth: int = 0, spawned_by: str | None = None,
+                   squad: str | None = None) -> str:
     """The shell command a spawned session runs: cd into the repo and launch claude
     with its handle pre-set, so its SessionStart hook registers it under ``name``.
-    ``GROUPCHAT_SPAWN_DEPTH``/``GROUPCHAT_SPAWNED_BY`` carry the spawn lineage to the
-    child so its own ``bootstrap`` is depth-limited (the runaway-recursion backstop)
-    and the agent row records who spawned it."""
+    ``GROUPCHAT_SPAWN_DEPTH``/``GROUPCHAT_SPAWNED_BY`` carry the spawn lineage; ``squad``
+    (``GROUPCHAT_SQUAD``) puts the child in a sub-team with its own barrier."""
     claude = shutil.which("claude") or "claude"
     env = f"GROUPCHAT_HANDLE={name} GROUPCHAT_SPAWN_DEPTH={int(depth)}"
     if spawned_by:
         env += f" GROUPCHAT_SPAWNED_BY={shlex.quote(spawned_by)}"
+    if squad:
+        env += f" GROUPCHAT_SQUAD={shlex.quote(squad)}"
     cmd = f"cd {shlex.quote(cwd)} && {env} {shlex.quote(claude)}"
     if prompt:
         cmd += " " + shlex.quote(prompt)
@@ -838,7 +859,8 @@ def _parse_spec(token: str) -> tuple[str, str | None]:
 def spawn_agents(names, cwd: str, method: str = "terminal",
                  prompt: str | None = None, dry_run: bool = False,
                  worktree: bool = False, prompts: dict | None = None,
-                 depth: int = 0, spawned_by: str | None = None) -> list[dict]:
+                 depth: int = 0, spawned_by: str | None = None,
+                 squad: str | None = None) -> list[dict]:
     """Open one agent session per handle in ``names``. Returns a per-name result
     list of dicts {name, command, ok, error}. ``dry_run`` (or method='print')
     spawns nothing and just reports the runnable commands. ``prompts`` maps a handle
@@ -853,7 +875,7 @@ def spawn_agents(names, cwd: str, method: str = "terminal",
         this_prompt = (prompts.get(name) if prompts else None) or prompt
         launch_dir = _worktree_path(cwd, name) if worktree else cwd
         launch_cmd = _spawn_command(name, launch_dir, this_prompt,
-                                    depth=depth, spawned_by=spawned_by)
+                                    depth=depth, spawned_by=spawned_by, squad=squad)
         # The reproducible one-liner shown to a human (print/dry-run) must also
         # create the worktree; the real-launch path makes it via subprocess first,
         # then runs only launch_cmd (re-running `git worktree add` would fail the
@@ -958,45 +980,58 @@ def record_tokens(conn, session_id: str, totals: dict) -> None:
 # --------------------------------------------------------------------------- #
 # Team barrier — when may a finished agent actually exit?
 # --------------------------------------------------------------------------- #
-def expected_team_size(conn) -> int | None:
-    """Declared team size, if any: ``$GROUPCHAT_TEAM_SIZE`` wins, else ``expect``."""
-    n = _env_int("GROUPCHAT_TEAM_SIZE")
-    if n is not None:
-        return n
-    mv = get_meta(conn, "team_size")
+def _size_keys(squad: str | None) -> tuple[str, str]:
+    """The (size, stamped-at) meta keys for a squad. The default room (``squad=None``)
+    keeps the original ``team_size`` keys, so an unsharded room is byte-identical; a
+    named squad gets ``team_size:<squad>``."""
+    sq = _norm_squad(squad) if isinstance(squad, str) else squad
+    return (("team_size", "team_size_at") if not sq
+            else (f"team_size:{sq}", f"team_size_at:{sq}"))
+
+
+def expected_team_size(conn, squad: str | None = None) -> int | None:
+    """Declared size for a squad (``None`` = the default room): ``$GROUPCHAT_TEAM_SIZE``
+    wins for the default room, else the ``expect``-stamped meta key for that squad."""
+    if not (_norm_squad(squad) if isinstance(squad, str) else squad):
+        n = _env_int("GROUPCHAT_TEAM_SIZE")
+        if n is not None:
+            return n
+    mv = get_meta(conn, _size_keys(squad)[0])
     return int(mv) if mv and mv.isdigit() else None
 
 
-def set_team_size(conn, n: int) -> None:
-    """Declare the expected team size (``expect`` / ``bootstrap``). Stamps *when* it
-    was set so a leftover from a long-departed cohort can later be told apart from a
-    fresh declaration for a still-assembling team — see the stale-size reclaim in
-    ``register()``. ``n <= 0`` clears the declaration."""
+def set_team_size(conn, n: int, squad: str | None = None) -> None:
+    """Declare the expected size for a squad (``expect`` / ``bootstrap``). Stamps *when*
+    it was set so a leftover from a long-departed cohort can be told apart from a fresh
+    declaration (see ``_clear_stale_team_size``). ``n <= 0`` clears it."""
+    ksize, kat = _size_keys(squad)
     if n <= 0:
-        del_meta(conn, "team_size")
-        del_meta(conn, "team_size_at")
+        del_meta(conn, ksize)
+        del_meta(conn, kat)
         return
-    set_meta(conn, "team_size", str(n))
-    set_meta(conn, "team_size_at", now_iso())
+    set_meta(conn, ksize, str(n))
+    set_meta(conn, kat, now_iso())
 
 
 def _clear_stale_team_size(conn, session_id: str) -> None:
-    """Drop a leftover ``team_size`` declared by a now-departed cohort so a quick solo
-    session in a REUSED room isn't routed into the 90s wait. Fires only when the
-    just-registered ``session_id`` is the SOLE active agent AND the size was declared
-    more than one active-window ago (so the cohort that declared it has certainly aged
-    out) — a FRESH declaration for a still-assembling team is recent and is never
-    erased. A missing ``team_size_at`` (a pre-stamp leftover in an old db) reads as
-    +inf age, i.e. stale. The age gate also makes the read-then-delete race benign:
-    only provably-stale sizes are ever cleared. ``$GROUPCHAT_TEAM_SIZE`` (env) wins in
-    ``expected_team_size`` and is untouched here."""
-    if get_meta(conn, "team_size") is None:
+    """Drop a leftover size declared by a now-departed cohort so a quick solo session in
+    a REUSED room isn't routed into the 90s wait. Scoped to the just-registered agent's
+    SQUAD (its own size key + its own active set): fires only when the agent is the SOLE
+    active member of its squad AND that squad's size was declared more than one
+    active-window ago. A teammate in a DIFFERENT squad never anchors (or defeats) the
+    reclaim, and a per-squad ``team_size:<squad>`` is reaped like the global one. A
+    missing stamp (old db) reads as +inf age, i.e. stale. ``$GROUPCHAT_TEAM_SIZE`` (env)
+    wins in ``expected_team_size`` and is untouched here."""
+    a = agent_by_session(conn, session_id)
+    squad = a["squad"] if a else None
+    ksize, kat = _size_keys(squad)
+    if get_meta(conn, ksize) is None:
         return
-    if any(a["session_id"] != session_id for a in active_agents(conn)):
-        return  # a teammate anchors the cohort — the size is live
-    if iso_age_seconds(get_meta(conn, "team_size_at")) >= ACTIVE_WINDOW_SECONDS:
-        del_meta(conn, "team_size")
-        del_meta(conn, "team_size_at")
+    if any(x["session_id"] != session_id for x in active_in_squad(conn, squad)):
+        return  # a squadmate anchors the cohort — the size is live
+    if iso_age_seconds(get_meta(conn, kat)) >= ACTIVE_WINDOW_SECONDS:
+        del_meta(conn, ksize)
+        del_meta(conn, kat)
 
 
 def max_park_seconds() -> int:
@@ -1009,17 +1044,15 @@ def solo_grace_seconds() -> int:
     return SOLO_GRACE_SECONDS if v is None else v
 
 
-def cohort_age_seconds(conn) -> float:
-    """Age of the *current cohort* — seconds since the earliest-joined active
-    agent first registered. Approximates "time since this run started" without a
-    persisted session marker, so a fresh burst of agents on an old room still
-    gets its startup grace."""
-    ages = [iso_age_seconds(a["first_seen"]) for a in active_agents(conn)]
+def cohort_age_seconds(conn, squad: str | None = None) -> float:
+    """Age of a squad's current cohort — seconds since its earliest-joined active agent
+    first registered (``None`` = the whole default room, byte-identical when unsharded)."""
+    ages = [iso_age_seconds(a["first_seen"]) for a in active_in_squad(conn, squad)]
     finite = [a for a in ages if a != float("inf")]
     return max(finite) if finite else 0.0
 
 
-def startup_guard_satisfied(conn) -> bool:
+def startup_guard_satisfied(conn, squad: str | None = None) -> bool:
     """Has the team finished assembling enough to trust the barrier?
 
     Closes the ragged-startup race where a fast agent stops before slower
@@ -1030,33 +1063,36 @@ def startup_guard_satisfied(conn) -> bool:
     run must never satisfy the size guard — that would defeat the barrier on any
     reused room (premature exit). Mirrors ``cohort_age_seconds`` / ``team_done``.
     """
-    n_active = len(active_agents(conn))
-    size = expected_team_size(conn)
+    n_active = len(active_in_squad(conn, squad))
+    size = expected_team_size(conn, squad)
     if size:
         if n_active >= size:
             return True
         # A declared team that never fully assembles (a failed bootstrap window, a
         # too-high size) must NOT hang everyone until the 2h ceiling: fall back to
         # the startup grace so it releases at ~90s instead. A no-show is bounded.
-        return cohort_age_seconds(conn) >= STARTUP_GRACE_SECONDS
+        return cohort_age_seconds(conn, squad) >= STARTUP_GRACE_SECONDS
     if n_active <= 1:
         # Solo (or alone-so-far) with no declared size: only a brief settle window,
         # not the full grace — a lone agent doesn't wait for absent teammates. A
         # co-launched teammate that registers within the window flips us into the
         # multi-agent branch below and gets the full ragged-startup grace.
-        return cohort_age_seconds(conn) >= solo_grace_seconds()
-    return cohort_age_seconds(conn) >= STARTUP_GRACE_SECONDS
+        return cohort_age_seconds(conn, squad) >= solo_grace_seconds()
+    return cohort_age_seconds(conn, squad) >= STARTUP_GRACE_SECONDS
 
 
-def team_done(conn) -> bool:
-    """True when every active agent has finished its slice — the barrier.
+def team_done(conn, squad: str | None = None) -> bool:
+    """True when every active barrier-capable agent in ``squad`` has finished — the
+    barrier. ``squad=None`` is the default global room (byte-identical when unsharded:
+    every agent has ``squad IS NULL`` so the scope is the whole active set). A finished
+    squad tears down independently of the rest of the fleet.
 
     Crashed/silent teammates age out of the active window and stop counting, so
     a dead agent can't wedge the team forever.
     """
-    if not startup_guard_satisfied(conn):
+    if not startup_guard_satisfied(conn, squad):
         return False
-    active = active_agents(conn)
+    active = active_in_squad(conn, squad)
     if not active:
         return False
     # Only barrier-capable agents (those with a Stop hook that marks done) gate the
@@ -2044,11 +2080,12 @@ def cmd_who(args):
         else:
             flag = "●"
         crown = " ★lead" if explicit_lead and r["handle"] == explicit_lead else ""
+        sq = f" ·squad:{r['squad']}" if r["squad"] else ""
         status = f" — {r['status']}" if r["status"] else ""
         foc = f" ▸ {r['focus']}" if r["focus"] else ""
         cwd = f"  [{r['cwd']}]" if r["cwd"] else ""
         toks = f" · {_fmt_count(r['out_tokens'])} out" if r["out_tokens"] else ""
-        print(f"{flag} {r['handle']}{crown}{status}{foc}{cwd}  "
+        print(f"{flag} {r['handle']}{crown}{sq}{status}{foc}{cwd}  "
               f"(seen {_hhmm(r['last_seen'] or '')}){toks}")
 
     # Team summary — how many instances are working, and against what target. Lets a
@@ -2066,6 +2103,16 @@ def cmd_who(args):
         else:
             line = f"team: {n} active · {done} done"
         print(line)
+        # Per-squad breakdown when the fleet is sharded (each squad has its own barrier).
+        squads = sorted({a["squad"] for a in actives if a["squad"]})
+        for sq in squads:
+            members = active_in_squad(conn, sq)
+            sdone = sum(1 for a in members if (a["status"] or "") == DONE_STATUS)
+            ssize = expected_team_size(conn, sq)
+            sline = f"  squad {sq}: {len(members)} active · {sdone} done"
+            if ssize:
+                sline += f" · expecting {ssize}"
+            print(sline)
 
     # Coordination state — shown only when there is *live* work, so the roster goes
     # quiet once everything is done (matching the briefing's dormancy; a lingering
@@ -2203,28 +2250,67 @@ def cmd_done(args):
         conn.close()
         return 1
     set_status(conn, a["session_id"], DONE_STATUS)
-    done = team_done(conn)
-    print(f"{a['handle']} marked done."
-          + (" Team is all done." if done else " Waiting for teammates."))
+    done = team_done(conn, a["squad"])  # this agent's squad barrier
+    where = f" (squad {a['squad']})" if a["squad"] else ""
+    unit = "Squad" if a["squad"] else "Team"
+    print(f"{a['handle']} marked done{where}."
+          + (f" {unit} is all done." if done else " Waiting for teammates."))
     conn.close()
     return 0
 
 
 def cmd_expect(args):
-    """Declare how many agents this run should have (closes the startup race
-    exactly). With no number, print the current expectation."""
+    """Declare how many agents this run should have (closes the startup race exactly).
+    ``--squad <name>`` declares a sub-team's size; with no number, print the current
+    expectation. Each squad has its own barrier."""
     conn = connect()
+    squad = _norm_squad(getattr(args, "squad", None))
+    label = f"squad '{squad}'" if squad else "team"
     if args.n is None:
-        size = expected_team_size(conn)
-        print(f"expected team size: {size}" if size else "expected team size: (unset — using startup grace)")
+        size = expected_team_size(conn, squad)
+        print(f"expected {label} size: {size}" if size
+              else f"expected {label} size: (unset — using startup grace)")
     elif args.n <= 0:
-        set_team_size(conn, args.n)
-        print("expected team size cleared (using startup grace)")
+        set_team_size(conn, args.n, squad)
+        print(f"expected {label} size cleared (using startup grace)")
     else:
-        set_team_size(conn, args.n)
-        print(f"expected team size set to {args.n}")
+        set_team_size(conn, args.n, squad)
+        print(f"expected {label} size set to {args.n}")
     conn.close()
     return 0
+
+
+def cmd_squad(args):
+    """Show / join a squad — a sub-team with its OWN barrier (a finished squad tears down
+    independently; the lead / @human funnel stays global). Empty = the default room."""
+    conn = connect()
+    a = _resolve_for_cli(conn, args)
+    if not a:
+        print("(no agent identity; pass --from <your handle> or --session)", file=sys.stderr)
+        conn.close(); return 1
+    if args.name:
+        raw = " ".join(args.name).strip()
+        sq = _norm_squad(raw)
+        if raw and not sq:
+            print(f"'{raw}' isn't a usable squad name (a-z, 0-9, '-', '_') — "
+                  "staying in the default room.", file=sys.stderr)
+            conn.close(); return 1
+        cur = agent_by_session(conn, a["session_id"])["squad"]
+        if sq != cur:
+            # Re-stamp first_seen so the NEW squad's cohort age (startup grace / solo
+            # settle) is honest about this agent just arriving — not its original join.
+            conn.execute("UPDATE agents SET squad=?, first_seen=? WHERE session_id=?",
+                         (sq, now_iso(), a["session_id"]))
+            conn.commit()
+        print(f"joined squad '{sq}'" if sq else "left your squad (back to the default room)")
+        conn.close(); return 0
+    cur = agent_by_session(conn, a["session_id"])["squad"]
+    if not cur:
+        print("you're in the default room (no squad)")
+    else:
+        mates = [x["handle"] for x in active_in_squad(conn, cur) if x["handle"] != a["handle"]]
+        print(f"squad '{cur}'" + (f" with {', '.join(mates)}" if mates else " (just you so far)"))
+    conn.close(); return 0
 
 
 def cmd_task(args):
@@ -2651,8 +2737,11 @@ def cmd_bootstrap(args):
         conn.close()
         return 1
     # How many agents are already here (incl. the bootstrapper) — so the declared
-    # size below counts the whole team, not just the newcomers.
+    # size below counts the whole team, not just the newcomers. With --squad, count the
+    # SQUAD's existing members (the bootstrapper usually isn't in the spawned squad).
+    boot_squad = _norm_squad(getattr(args, "squad", None))
     n_active_before = len(active_agents(conn))
+    n_squad_before = len(active_in_squad(conn, boot_squad)) if boot_squad else n_active_before
     conn.close()
 
     # Safe-autonomous-spawn backstops (the runaway-recursion / fleet-blowup guards).
@@ -2677,7 +2766,7 @@ def cmd_bootstrap(args):
     results = spawn_agents(names, cwd, method=method, prompt=args.prompt,
                            dry_run=args.dry_run, worktree=args.worktree,
                            prompts=(prompt_map or None),
-                           depth=depth + 1, spawned_by=spawner)
+                           depth=depth + 1, spawned_by=spawner, squad=boot_squad)
     only_printing = args.dry_run or method == "print"
     verb = "would spawn" if only_printing else "spawned"
     ok = sum(1 for r in results if r["ok"])
@@ -2696,14 +2785,15 @@ def cmd_bootstrap(args):
         # spawns nothing, so committing a barrier of N nonexistent agents would force
         # ~90s waits on whoever's here — the human declares via `expect N` once the
         # windows are actually open.
-        size = n_active_before + ok
+        size = (n_squad_before if boot_squad else n_active_before) + ok
         conn = connect()
-        set_team_size(conn, size)
+        set_team_size(conn, size, boot_squad)
         if getattr(args, "goal", None):
             set_goal(conn, args.goal)  # bootstrap IS team formation — record the goal
         conn.close()
-        print(f"\nDeclared team size: {size} "
-              f"(the barrier waits for the team; `expect N` to adjust).")
+        print(f"\nDeclared {('squad ' + boot_squad) if boot_squad else 'team'} size: {size} "
+              f"(its barrier waits for the {'squad' if boot_squad else 'team'}; "
+              f"`expect{(' --squad ' + boot_squad) if boot_squad else ''} N` to adjust).")
         if getattr(args, "goal", None):
             print(f"Shared goal: {args.goal} "
                   "(every agent sees it in their briefing and `who`).")
@@ -3807,7 +3897,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("expect", help="declare/show the expected number of agents this run")
     sp.add_argument("n", nargs="?", type=int, help="expected agent count (omit to show)")
+    sp.add_argument("--squad", help="declare a sub-team's size (its own barrier)")
     sp.set_defaults(func=cmd_expect)
+
+    sp = sub.add_parser("squad", help="show / join a sub-team (its own barrier; global lead)")
+    add_identity(sp)
+    sp.add_argument("name", nargs="*", help="squad to join (omit to show; empty to leave)")
+    sp.set_defaults(func=cmd_squad)
 
     sp = sub.add_parser("rename", help="change your handle (keeps your session/history)")
     add_identity(sp)
@@ -3915,6 +4011,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--worktree", action="store_true",
                     help="give each spawned agent its own git worktree (branch "
                          "groupchat/<name>) so their file edits can't collide")
+    sp.add_argument("--squad", help="spawn the agents into a sub-team with its own barrier")
     sp.add_argument("--force", action="store_true",
                     help=f"a human's override: spawn past the count cap ({BOOTSTRAP_MAX}), "
                          "the spawn-depth limit, and the fleet ceiling")

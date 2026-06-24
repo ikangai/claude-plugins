@@ -36,35 +36,45 @@ def main():
     agent = chat.agent_by_session(conn, sid)
     path = os.path.abspath(chat.__file__)
 
-    others = [a for a in chat.active_agents(conn) if a["handle"] != handle]
+    all_others = [a for a in chat.active_agents(conn) if a["handle"] != handle]
 
     # Announce a genuine first join into a NON-empty room so existing agents become
     # aware of the new instance via their cursor. Solo joins stay silent (preserving
     # byte-identical behaviour in an unused room); it's a broadcast with no @mention,
     # so it never blocks anyone. Best-effort — a failure must not disturb the briefing.
-    if not existed and others:
+    if not existed and all_others:
         try:
             chat.send(conn, "system",
-                      f"{handle} joined the room — {len(others) + 1} agents active now.",
+                      f"{handle} joined the room — {len(all_others) + 1} agents active now.",
                       kind="system")
         except Exception:
             pass
 
     recent = chat.recent_messages(conn, RECENT)  # includes our own join notice
 
+    # The barrier scopes to this agent's SQUAD (None = the default room = the whole
+    # fleet, byte-identical when unsharded), so the team line reflects what it actually
+    # waits for — not the fleet, if it's in a sub-team.
+    squad = agent["squad"] if agent else None
+    others = ([a for a in chat.active_in_squad(conn, squad) if a["handle"] != handle]
+              if squad else all_others)
+    sq_word = f"Squad '{squad}'" if squad else "Team"
+
     # Team-status line: how many instances are working, against any declared target —
     # and an explicit "you won't wait" for a solo agent (goal: when solo, don't wait).
-    size = chat.expected_team_size(conn)
+    size = chat.expected_team_size(conn, squad)
     n_active = len(others) + 1
     if size:
-        team_line = (f"Team: {n_active}/{size} agents active so far"
+        team_line = (f"{sq_word}: {n_active}/{size} agents active so far"
                      + ("." if n_active >= size
                         else f" — waiting on {size - n_active} more at the barrier."))
     elif others:
-        team_line = (f"Team: {n_active} agents active "
-                     "(size undeclared — `expect N` to set it).")
+        team_line = (f"{sq_word}: {n_active} agents active "
+                     f"(size undeclared — `expect{' --squad ' + squad if squad else ''} N` "
+                     "to set it).")
     else:
-        team_line = "Working solo — no team-barrier wait beyond a brief settle window."
+        team_line = (f"Working solo{f' in squad ' + squad if squad else ''} — "
+                     "no team-barrier wait beyond a brief settle window.")
 
     # Coordination block — the shared goal, this agent's own assignments, and any
     # unclaimed work. Dormant until used: a room with no goal and no tasks adds
