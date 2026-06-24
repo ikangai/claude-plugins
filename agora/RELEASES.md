@@ -1,5 +1,27 @@
 # Release notes
 
+## v0.15.0 — 2026-06-24
+
+### Per-squad leads + a chair-topped council
+Leadership now scales with the fleet. Each squad gets a **captain**; the captains escalate
+to one **chair** (the global lead, still the sole operator contact). The `@human` funnel
+climbs **worker → squad captain → chair → operator**, so each tier absorbs what it can.
+- **`resolve_lead(conn, squad)`** — a squad's captain (emergent floor within the squad +
+  claimable `lead:<squad>`); `resolve_lead(conn, None)` is the chair (byte-identical to the
+  old global lead).
+- **Routing** — a worker's `@human` → its captain (delegated); a captain's `@human` → the
+  chair, **kept** so the existing per-session gate **parks the captain** until the chair
+  answers (its squad held up by the already-per-squad barrier); the chair's → the operator.
+- **`lead`** is squad-scoped (`--chair` targets the global chair); **`council`** shows the
+  chair + captains; **`questions`** separates the chair's operator-level escalations from
+  captains' in-flight ones.
+- The only new gate machinery is one clear-clause (a captain's escalation also clears when
+  the chair relays down) — **dormant when unsharded**: a room with no squads behaves
+  exactly as the flat leadership did (verified by the full suite staying green).
+
+A captain that renames keeps its captaincy (the `lead:<squad>` pointer follows the rename,
+like the global lead always has).
+
 ## v0.14.0 — 2026-06-24
 
 ### Heterogeneous-model quorum — the capture wall, made visible

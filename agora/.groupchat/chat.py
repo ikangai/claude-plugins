@@ -547,11 +547,15 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
                 "DELETE FROM agents WHERE session_id = ? AND (last_seen IS NULL OR last_seen < ?)",
                 (stale["session_id"], cutoff),
             )
-            # Only if a row was actually retired, and it was the lead, drop the stale
-            # pointer so a name-reuser doesn't inherit leadership — resolve_lead's
-            # floor re-elects instead. (Routing reads meta['lead']; hierarchy layer.)
-            if cur.rowcount and (get_meta(conn, "lead") or "").strip().lower() == h:
-                del_meta(conn, "lead")
+            # Only if a row was actually retired, and it held a lead pointer, drop the
+            # stale pointer so a name-reuser doesn't inherit leadership — resolve_lead's
+            # floor re-elects instead. Covers BOTH the global chair ('lead') and any squad
+            # captaincy ('lead:<squad>') the reclaimed handle held (council layer).
+            if cur.rowcount:
+                for (k,) in conn.execute(
+                        "SELECT key FROM meta WHERE key='lead' OR key LIKE 'lead:%'").fetchall():
+                    if (get_meta(conn, k) or "").strip().lower() == h:
+                        del_meta(conn, k)
         try:
             conn.execute(
                 "INSERT INTO agents(session_id, handle, cwd, pid, status, "
@@ -617,10 +621,15 @@ def rename_agent(conn: sqlite3.Connection, session_id: str,
         )
     except sqlite3.IntegrityError:
         raise ValueError(f"handle '{new}' was just taken — try another")
-    # Leadership follows the rename: meta['lead'] stores a handle, so without this a
-    # renamed lead would orphan the pointer until the floor re-elected.
-    if (get_meta(conn, "lead") or "").strip().lower() == old.lower():
-        set_meta(conn, "lead", new)
+    # Leadership follows the rename: a lead pointer stores a handle, so without this a
+    # renamed lead would orphan the pointer until the floor re-elected. Repoint only the
+    # scopes THIS agent can legitimately hold — the global chair ('lead') and its own
+    # squad's captaincy ('lead:<its squad>') — so a rename never refreshes some other
+    # squad's stale pointer that happens to match the old handle.
+    scopes = ["lead"] + ([_lead_key(agent["squad"])] if agent["squad"] else [])
+    for k in scopes:
+        if (get_meta(conn, k) or "").strip().lower() == old.lower():
+            set_meta(conn, k, new)
     conn.commit()
     # Let teammates learn the rename through the normal cursor. kind='system'
     # carries no @mentions, so it neither blocks a Stop nor gates the team barrier;
@@ -1596,31 +1605,34 @@ def list_results(conn, sender: str | None = None,
 # that track (chat #20): the shared pointer wins, then an operator env override, then
 # a deterministic FLOOR so a lead ALWAYS exists and fails over the instant one ages
 # out — that floor is what kills the single-point-of-failure the research flagged.
-def resolve_lead(conn) -> str | None:
-    """The handle of the agent who currently owns human contact, or None only when
-    no agent is active (degenerate → flat, @human passes through). Order:
+def resolve_lead(conn, squad: str | None = None) -> str | None:
+    """The handle of the agent who currently owns human contact for ``squad``, or None
+    only when no agent is active there. ``squad=None`` resolves the **chair** (the global
+    lead — the sole operator contact); a named squad resolves that squad's **captain**
+    (within ``active_in_squad``). Order:
 
-    1. ``meta['lead']``    — the canonical shared pointer (a claim/designation/
-       election result), **if its holder is currently active**;
-    2. ``$GROUPCHAT_LEAD`` — an operator env override, if its holder is active;
-    3. **floor** — the earliest-joined active agent (tie broken by handle): a
+    1. the pointer — ``meta['lead']`` for the chair, ``meta['lead:<squad>']`` for a
+       captain — **if its holder is currently active in that scope**;
+    2. ``$GROUPCHAT_LEAD`` — an operator env override (chair only), if its holder is active;
+    3. **floor** — the earliest-joined active agent in the scope (tie broken by handle): a
        deterministic, zero-config default that guarantees a live lead and instant
-       failover. The shared pointer is honoured only while alive, so a parked/dead
-       lead silently hands off to the floor — no SPOF, no stale routing.
+       failover. The pointer is honoured only while alive, so a parked/dead lead silently
+       hands off to the floor — no SPOF, no stale routing.
 
-    Pure/read-only: a stale ``meta['lead']`` is *not* cleared here (the write track
-    owns that); read just falls through to the floor. Keying on the active set means
-    the lead is always a real agent who can actually receive the routed @mention."""
-    acts = active_agents(conn)
+    Pure/read-only. ``resolve_lead(conn)`` (no squad) is byte-identical to before: the
+    chair scope is ``active_agents`` and the key is ``meta['lead']``."""
+    acts = active_in_squad(conn, squad) if squad else active_agents(conn)
     if not acts:
         return None
     active_handles = {a["handle"] for a in acts}
-    pointer = (get_meta(conn, "lead") or "").strip().lower()
+    key = "lead" if not squad else f"lead:{_norm_squad(squad)}"
+    pointer = (get_meta(conn, key) or "").strip().lower()
     if pointer and pointer in active_handles:
         return pointer
-    env = (_env("LEAD") or "").strip().lower()
-    if env and env in active_handles:
-        return env
+    if not squad:  # the chair honours the operator's env override; squads don't
+        env = (_env("LEAD") or "").strip().lower()
+        if env and env in active_handles:
+            return env
     return min(acts, key=lambda a: (a["first_seen"] or "", a["handle"]))["handle"]
 
 
@@ -1655,26 +1667,59 @@ def _has_unquoted_human(body: str) -> bool:
                for m in MENTION_RE.finditer(body))
 
 
+def _squad_of_handle(conn, handle: str) -> str | None:
+    """The squad of the active agent with ``handle`` (None if unsquadded / not active)."""
+    h = (handle or "").strip().lower()
+    return next((x["squad"] for x in active_agents(conn) if x["handle"] == h), None)
+
+
 def human_redirect_target(conn, sender: str, body: str) -> str | None:
-    """The lead handle a worker's @human should be redirected to, or None when no
-    redirect applies (no active lead, the sender IS the lead, or no *unquoted*
-    @human in the body — a `` `@human` `` mention in docs/help text never escalates).
-    Pure/read-only — both the send guard and the CLI feedback note call this."""
-    lead = resolve_lead(conn)
-    if not lead:
-        return None  # flat mode — unchanged
-    if (sender or "").strip().lower() == lead:
-        return None  # the lead owns the human channel
+    """The handle a sender's @human should be routed to one hop UP the council, or None
+    when it passes through to the operator (the sender is the chair) or no redirect
+    applies (no active lead, or no *unquoted* @human — a `` `@human` `` in docs never
+    escalates). The chain: a worker → its squad lead; a squad lead → the chair; the chair
+    → the operator. Unsharded (no squad) → straight to the chair, exactly as before.
+    Pure/read-only — the send guard and the CLI feedback note both call this."""
     if not _has_unquoted_human(body):
         return None
-    return lead
+    chair = resolve_lead(conn, None)
+    if not chair:
+        return None  # flat mode — unchanged
+    s = (sender or "").strip().lower()
+    sq = _squad_of_handle(conn, s)
+    if sq:
+        captain = resolve_lead(conn, sq)
+        if s != captain:
+            return captain      # a worker → its squad's captain
+        # the captain itself escalates one hop up, to the chair
+        return chair if s != chair else None  # captain → chair (or pass through if it IS chair)
+    # default-room (no squad): straight to the chair, as today
+    return chair if s != chair else None
+
+
+def _is_captain_escalation(conn, sender: str, target: str) -> bool:
+    """True when ``sender`` is a SQUAD CAPTAIN escalating to the chair (target == chair).
+    Such an escalation KEEPS its @human so the existing per-session gate parks the captain
+    until the chair answers — a worker's redirect strips @human (it delegates, not gated)."""
+    s = (sender or "").strip().lower()
+    sq = _squad_of_handle(conn, s)
+    return bool(sq and s == resolve_lead(conn, sq) and target == resolve_lead(conn, None)
+                and s != target)
 
 
 def _apply_human_guard(conn, sender: str, body: str) -> str:
-    """Hub-and-spoke send guard: rewrite a worker's @human → @<lead>. No-op unless
-    a redirect applies (see human_redirect_target)."""
+    """Hub-and-spoke send guard. A worker's @human is rewritten → @<next hop> (stripped,
+    delegated). A squad CAPTAIN escalating to the chair KEEPS its @human (so it's gated)
+    and the chair is @mentioned for delivery. No-op unless a redirect applies."""
     target = human_redirect_target(conn, sender, body)
-    return _redirect_mention(body, HUMAN_TOKEN, target) if target else body
+    if not target:
+        return body
+    if _is_captain_escalation(conn, sender, target):
+        # Keep @human (gates the captain via session_open_escalations) AND @mention the
+        # chair so it receives the escalation to relay. Idempotent: don't double-prepend if
+        # the chair is already mentioned (a re-sent body).
+        return body if target in parse_mentions(body) else f"@{target} {body}"
+    return _redirect_mention(body, HUMAN_TOKEN, target)
 
 
 def _mentions(row) -> list:
@@ -1739,37 +1784,76 @@ def session_open_escalations(conn, session_id: str) -> list[int]:
     if not a:
         return []
     handle = (a["handle"] or "").strip().lower()
+    # A CAPTAIN's escalation (the asker is a squad member — only a captain keeps @human; a
+    # worker's is stripped) is answered by the CHAIR relaying down, not only by the
+    # operator. The clear must be TIME-INVARIANT: we replay immutable history, so keying on
+    # the LIVE chair would re-open an already-answered escalation the moment the chair
+    # changes (rename / hand-off / floor failover). Instead clear on a reply from a FROZEN
+    # addressee (a handle this captain actually escalated to — its escalation @mentions the
+    # chair-at-that-time) OR the current chair (a new chair relaying). Scoped to a
+    # squad-having asker, so in a FLAT room (no squads) the clause is a strict no-op and
+    # only the operator clears — byte-identical to before.
+    asker_has_squad = bool(a["squad"])
+    chair = resolve_lead(conn, None)
     rows = conn.execute(
         "SELECT id, sender, session_id, body, mentions FROM messages "
         "WHERE kind='chat' ORDER BY id ASC").fetchall()
     open_ids: list[int] = []
+    addressees: set[str] = set()
     for r in rows:
+        sndr = (r["sender"] or "").strip().lower()
+        ments = [m.lower() for m in _mentions(r)]
         if r["session_id"] == session_id and _has_unquoted_human(r["body"]):
             open_ids.append(r["id"])
-        elif r["sender"] == HUMAN_TOKEN and handle in [m.lower() for m in _mentions(r)]:
-            open_ids = []
+            if asker_has_squad:
+                addressees |= set(ments)          # the chair handle(s) escalated to (frozen)
+        elif sndr == HUMAN_TOKEN and handle in ments:
+            open_ids = []                         # the operator answered
+        elif (asker_has_squad and handle in ments and sndr != handle
+              and not _has_unquoted_human(r["body"])
+              and (sndr in addressees or (chair and sndr == chair))):
+            open_ids = []                         # the chair relayed an answer down
     return open_ids
 
 
 def all_open_escalations(conn) -> dict:
     """``{session_id: [msg_ids]}`` for every unanswered @human escalation room-wide — so
     the operator's ``questions`` view shows what they owe across renames AND handoffs
-    (not just the *current* lead's). Each session's queue clears on an operator reply
-    @mentioning that session's CURRENT handle."""
-    sess_handle = {r["session_id"]: (r["handle"] or "").strip().lower()
-                   for r in conn.execute("SELECT session_id, handle FROM agents").fetchall()}
+    (not just the *current* lead's). A queue clears on an operator reply @mentioning that
+    session's CURRENT handle — or, for a captain's in-flight escalation, on the CHAIR
+    relaying down to it (dormant when unsharded: no captains, the chair never clears its
+    own)."""
+    agents = {r["session_id"]: r for r in
+              conn.execute("SELECT session_id, handle, squad FROM agents").fetchall()}
+    sess_handle = {s: (r["handle"] or "").strip().lower() for s, r in agents.items()}
+    sess_squad = {s: r["squad"] for s, r in agents.items()}
     handle_sess = {h: s for s, h in sess_handle.items() if h}
+    chair = resolve_lead(conn, None)
     rows = conn.execute(
         "SELECT id, sender, session_id, body, mentions FROM messages "
         "WHERE kind='chat' ORDER BY id ASC").fetchall()
     queues: dict = {}
+    addressees: dict = {}   # session -> frozen handles it escalated to (captains only)
     for r in rows:
+        sndr = (r["sender"] or "").strip().lower()
+        ments = [m.lower() for m in _mentions(r)]
         if r["session_id"] and _has_unquoted_human(r["body"]):
             queues.setdefault(r["session_id"], []).append(r["id"])
-        elif r["sender"] == HUMAN_TOKEN:
-            for m in _mentions(r):
-                sid = handle_sess.get(m.lower())
+            if sess_squad.get(r["session_id"]):
+                addressees.setdefault(r["session_id"], set()).update(ments)
+        elif sndr == HUMAN_TOKEN:
+            for m in ments:
+                sid = handle_sess.get(m)
                 if sid in queues:
+                    queues[sid] = []              # the operator answered
+        elif not _has_unquoted_human(r["body"]):
+            # A captain's queue clears when the chair relays down — time-invariant: the
+            # relayer is a FROZEN addressee of that captain's escalation OR the current
+            # chair. Only for squad-having (captain) askers, so flat rooms are unaffected.
+            for m in ments:
+                sid = handle_sess.get(m)
+                if (sid in queues and sess_squad.get(sid) and sndr != m
+                        and (sndr in addressees.get(sid, set()) or (chair and sndr == chair))):
                     queues[sid] = []
     # Only surface queues whose author still has an agent row — a departed/recycled
     # session's question is moot (the asker is gone) and would be unanswerable.
@@ -1783,23 +1867,30 @@ def all_open_escalations(conn) -> dict:
 # while its holder is active, so the write side never has to unset a crashed lead
 # — a dead pointer simply fails over to the floor on the next read. Setting the
 # pointer is the ONLY write; there is no role column to keep in sync.
-def set_lead(conn, handle: str) -> str:
-    """Point meta['lead'] at ``handle`` (claim / designate / hand-off). Returns the
-    normalized handle. Honoured by resolve_lead() only while that handle is active."""
+def _lead_key(squad: str | None) -> str:
+    """The meta pointer key for a lead scope: ``lead`` for the chair (squad=None), else
+    ``lead:<squad>`` for a squad's captain."""
+    return "lead" if not squad else f"lead:{_norm_squad(squad)}"
+
+
+def set_lead(conn, handle: str, squad: str | None = None) -> str:
+    """Point the lead pointer for ``squad`` at ``handle`` (claim / designate / hand-off);
+    ``squad=None`` is the chair. Returns the normalized handle. Honoured by resolve_lead()
+    only while that handle is active in the scope."""
     h = (handle or "").strip().lower()
     if not h:
         raise ValueError("lead handle must be non-empty")
     if h in RESERVED_HANDLES:
         raise ValueError(f"'{h}' is reserved and cannot be the lead")
-    set_meta(conn, "lead", h)
+    set_meta(conn, _lead_key(squad), h)
     conn.commit()
     return h
 
 
-def clear_lead(conn) -> None:
-    """Release the designated lead → resolve_lead() falls back to the deterministic
-    floor (the earliest-joined active agent)."""
-    del_meta(conn, "lead")
+def clear_lead(conn, squad: str | None = None) -> None:
+    """Release the designated lead for ``squad`` (None = the chair) → resolve_lead() falls
+    back to the floor (the earliest-joined active agent in the scope)."""
+    del_meta(conn, _lead_key(squad))
     conn.commit()
 
 
@@ -1972,16 +2063,37 @@ def cmd_questions(args):
         print("(no open escalations — the fleet owes you nothing)")
         conn.close()
         return 0
-    sess_handle = {r["session_id"]: r["handle"] for r in
-                   conn.execute("SELECT session_id, handle FROM agents").fetchall()}
-    print('open escalation(s) awaiting you  —  answer with: answer <id> "..."')
-    for sid, ids in queues.items():
+    arows = {r["session_id"]: r for r in
+             conn.execute("SELECT session_id, handle, squad FROM agents").fetchall()}
+    sess_handle = {s: r["handle"] for s, r in arows.items()}
+    chair = resolve_lead(conn, None)
+    # A CAPTAIN's escalation (asker is a squad member) is in flight to the chair, who
+    # relays; everything else (the chair's own, or an orphaned/handed-off operator
+    # escalation) is operator-level — awaiting YOU. Keying on the asker's squad (not on
+    # "author == current chair") keeps a flat room's in_flight empty = byte-identical.
+    in_flight = {s: ids for s, ids in queues.items()
+                 if arows.get(s) and arows[s]["squad"]}
+    awaiting = {s: ids for s, ids in queues.items() if s not in in_flight}
+
+    def _show(sid, ids):
         h = sess_handle.get(sid, "?")
         for mid in ids:
-            row = conn.execute(
-                "SELECT id, ts, body FROM messages WHERE id=?", (mid,)).fetchone()
+            row = conn.execute("SELECT id, ts, body FROM messages WHERE id=?", (mid,)).fetchone()
             if row:
                 print(f"  #{row['id']} {_hhmm(row['ts'])} @{h}: {row['body']}")
+
+    if awaiting:
+        print('open escalation(s) awaiting you  —  answer with: answer <id> "..."')
+        for sid, ids in awaiting.items():
+            _show(sid, ids)
+    else:
+        print("(no escalations awaiting you — the chair owes you nothing)")
+    if in_flight:
+        n = sum(len(v) for v in in_flight.values())
+        print(f"\n{n} escalation(s) in flight to the chair @{chair} (captains awaiting "
+              "the chair's relay — not yours to answer directly):")
+        for sid, ids in in_flight.items():
+            _show(sid, ids)
     conn.close()
     return 0
 
@@ -2010,10 +2122,15 @@ def cmd_answer(args):
     # Reach the asker by its CURRENT handle (resolved via the frozen author session),
     # so an answer still lands after the lead renamed. Falls back to the frozen sender.
     target = row["sender"]
-    if row["session_id"]:
-        author = agent_by_session(conn, row["session_id"])
-        if author:
-            target = author["handle"]
+    author = agent_by_session(conn, row["session_id"]) if row["session_id"] else None
+    if author:
+        target = author["handle"]
+    # A captain's escalation is normally relayed by the chair (the funnel) — answering it
+    # directly works but bypasses the chair. Inform, don't block (operator agency).
+    if author and author["squad"] and (target or "").lower() != resolve_lead(conn, None):
+        print(f"note: @{target} is a captain — its escalation usually reaches you via the "
+              f"chair @{resolve_lead(conn, None)}. Answering directly bypasses the funnel.",
+              file=sys.stderr)
     text = args.message if isinstance(args.message, str) else " ".join(args.message)
     text = text.strip()
     if not text:
@@ -2117,6 +2234,13 @@ def cmd_who(args):
     _ptr = (get_meta(conn, "lead") or "").strip().lower()
     _envlead = (_env("LEAD") or "").strip().lower()
     explicit_lead = lead if (lead and lead in (_ptr, _envlead)) else None
+    # Per-squad captains who are DESIGNATED (an explicit lead:<squad> pointer, not the
+    # implicit floor) get a ★captain crown — so a sharded roster shows the council.
+    squad_captain = {}
+    for sq in {r["squad"] for r in rows if r["squad"]}:
+        ptr = (get_meta(conn, _lead_key(sq)) or "").strip().lower()
+        if ptr:
+            squad_captain[sq] = ptr
     chat_ages = last_chat_ages(conn)        # one grouped query, not N
     solo = len(actives) <= 1                # the quiet ◐ has no consumer when alone
     for r in rows:
@@ -2127,7 +2251,12 @@ def cmd_who(args):
             flag = "◐"
         else:
             flag = "●"
-        crown = " ★lead" if explicit_lead and r["handle"] == explicit_lead else ""
+        if explicit_lead and r["handle"] == explicit_lead:
+            crown = " ★lead"
+        elif r["squad"] and squad_captain.get(r["squad"]) == r["handle"]:
+            crown = " ★captain"
+        else:
+            crown = ""
         sq = f" ·squad:{r['squad']}" if r["squad"] else ""
         status = f" — {r['status']}" if r["status"] else ""
         foc = f" ▸ {r['focus']}" if r["focus"] else ""
@@ -2207,28 +2336,37 @@ def cmd_lead(args):
     election. resolve_lead() (read side) honours the pointer only while its holder is
     active, so a parked/crashed lead auto-fails-over to the floor — no manual cleanup."""
     conn = connect()
+    # Scope: the caller's SQUAD captaincy by default (a squad agent steers its own squad);
+    # the global CHAIR when --chair is passed or the caller is in the default room. So
+    # `lead --claim` makes you your squad's captain; `lead --chair --claim` makes you chair.
+    caller = _resolve_for_cli(conn, args)
+    scope = None if getattr(args, "chair", False) else (caller["squad"] if caller else None)
+    # The global lead is "the lead" in a flat room (byte-identical wording) and "the chair"
+    # once squads exist (council framing); a squad's is always "captain".
+    _sharded = any(a["squad"] for a in active_agents(conn))
+    role = (("chair" if _sharded else "lead") if not scope
+            else f"captain of squad '{scope}'")
     if getattr(args, "release", False):
-        prev = get_meta(conn, "lead")
-        clear_lead(conn)
-        now = resolve_lead(conn)
+        prev = get_meta(conn, _lead_key(scope))
+        clear_lead(conn, scope)
+        now = resolve_lead(conn, scope)
         send(conn, "system",
-             f"Lead released{f' (was @{prev})' if prev else ''} — "
-             + (f"the floor lead is now @{now} (earliest-joined active)."
-                if now else "no agents active; flat mode."),
+             f"{role.capitalize()} released{f' (was @{prev})' if prev else ''} — "
+             + (f"the floor is now @{now} (earliest-joined active)."
+                if now else "no agents active in scope."),
              kind="system")
-        print(f"released the lead → floor is now @{now}" if now
-              else "released the lead (no active agents)")
+        print(f"released the {role} → floor is now @{now}" if now
+              else f"released the {role} (no active agents)")
         conn.close()
         return 0
     target = None
     if getattr(args, "claim", False):
-        a = _resolve_for_cli(conn, args)
-        if not a:
+        if not caller:
             print("lead --claim needs your identity: pass --from <your handle> "
                   "(or --session <id>)", file=sys.stderr)
             conn.close()
             return 1
-        target = a["handle"]
+        target = caller["handle"]
     elif getattr(args, "handle", None):
         target = args.handle
     if target:
@@ -2239,47 +2377,72 @@ def cmd_lead(args):
         # directly would be lost (audit #70). Refuse it (reserved/empty still get
         # set_lead's specific message).
         _t = (target or "").strip().lower()
-        if _t and _t not in RESERVED_HANDLES \
-                and _t not in {x["handle"] for x in active_agents(conn)}:
-            print(f"@{_t} is not an active agent — can't be the lead. A lead must be "
-                  f"active so a worker's @human reaches it; an inactive pointer would "
-                  f"silently fall through to the floor (see `lead` / `who`).",
+        scope_actives = {x["handle"] for x in (active_in_squad(conn, scope) if scope
+                                               else active_agents(conn))}
+        if _t and _t not in RESERVED_HANDLES and _t not in scope_actives:
+            where = f"in squad '{scope}'" if scope else "active"
+            print(f"@{_t} is not {where} — can't be the {role}. A lead must be active in "
+                  f"its scope so a worker's @human reaches it; an inactive pointer would "
+                  f"silently fall through to the floor (see `lead` / `who` / `council`).",
                   file=sys.stderr)
             conn.close()
             return 1
         try:
-            h = set_lead(conn, target)
+            h = set_lead(conn, target, scope)
         except ValueError as e:
             print(str(e), file=sys.stderr)
             conn.close()
             return 1
+        dest = "the operator" if not scope else "the chair"
         send(conn, "system",
-             f"@{h} is now the lead. Workers: your @human messages route to @{h} — the "
-             f"single point of contact who batches questions for the operator.",
+             f"@{h} is now the {role}. {('Workers' if not scope else 'Squad ' + scope)}: "
+             f"your @human routes to @{h}, who batches questions for {dest}.",
              kind="system")
-        print(f"lead is now @{h}")
+        print(f"{role} is now @{h}")
         conn.close()
         return 0
     # show
-    lead = resolve_lead(conn)
+    lead = resolve_lead(conn, scope)
     if not lead:
-        print("no active agents — flat (no lead)")
+        print(f"no active agents in scope — flat (no {role})")
         conn.close()
         return 0
-    pointer = (get_meta(conn, "lead") or "").strip().lower()
+    pointer = (get_meta(conn, _lead_key(scope)) or "").strip().lower()
     env = (_env("LEAD") or "").strip().lower()
-    actives = {x["handle"] for x in active_agents(conn)}
+    actives = {x["handle"] for x in (active_in_squad(conn, scope) if scope
+                                     else active_agents(conn))}
     if pointer and pointer in actives:
         why = "claimed / designated"
-    elif env and env in actives:
+    elif not scope and env and env in actives:
         why = "operator env GROUPCHAT_LEAD"
     else:
         why = "floor — earliest-joined active (emergent default)"
-    print(f"lead: @{lead}  [{why}]")
+    print(f"{role}: @{lead}  [{why}]")
     if pointer and pointer not in actives:
         print(f"  note: designated @{pointer} is inactive — failed over to the floor")
     conn.close()
     return 0
+
+
+def cmd_council(args):
+    """Show the council: the chair (sole operator contact) + each squad's captain. The
+    @human funnel climbs worker → squad captain → chair → operator. Dormant-friendly: in
+    an unsharded room it just shows the single lead."""
+    conn = connect()
+    chair = resolve_lead(conn, None)
+    if not chair:
+        print("no active agents — flat (no council)")
+        conn.close(); return 0
+    squads = sorted({a["squad"] for a in active_agents(conn) if a["squad"]})
+    print(f"chair: @{chair}  (the single operator contact)")
+    if not squads:
+        print("  (no squads — flat room; @human → the chair → operator)")
+    for sq in squads:
+        cap = resolve_lead(conn, sq)
+        members = [a["handle"] for a in active_in_squad(conn, sq)]
+        print(f"  squad {sq}: captain @{cap}  ({len(members)} member(s): "
+              f"{', '.join(members)})")
+    conn.close(); return 0
 
 
 def cmd_heartbeat(args):
@@ -3986,7 +4149,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="claim the lead for yourself (needs --from / --session)")
     sp.add_argument("--release", action="store_true",
                     help="step down → the deterministic floor takes over")
+    sp.add_argument("--chair", action="store_true",
+                    help="operate on the global CHAIR instead of your squad's captaincy")
     sp.set_defaults(func=cmd_lead)
+
+    sp = sub.add_parser("council",
+                        help="show the council: the chair + each squad's captain")
+    sp.set_defaults(func=cmd_council)
 
     sp = sub.add_parser("questions", aliases=["escalations"],
                         help="[operator] the lead's open @human escalations awaiting your answer")
