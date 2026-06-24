@@ -4,7 +4,7 @@ argument-hint: ["what you produced" | --task N | (empty to collect)]
 ---
 A **result** is how a worker hands its outcome back to whoever is coordinating — a
 `kind='result'` message that rides the bus but carries no @mention, so it never blocks
-a teammate or wedges the barrier. Use the group-chat CLI path from your SessionStart
+a teammate or wedges the barrier. Use the agora CLI path from your SessionStart
 briefing as `<cli>` and your handle as `<you>`.
 
 - **Report a result** (non-empty `$ARGUMENTS`) → `<cli> result --from <you> "<what you

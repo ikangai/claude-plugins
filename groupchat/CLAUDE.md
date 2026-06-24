@@ -68,12 +68,12 @@ Three layers, all dependency-free Python 3 stdlib:
      repointed) and a `system` notice rides the cursor so teammates' rosters stay
      coherent. So a pool-named roster (`ada, turing`) can become role-named
      (`frontend, backend`) without restarting.
-   - **Bootstrap the team (`/groupchat:team`, `chat.py bootstrap`).** Picks N free
+   - **Bootstrap the team (`/agora:team`, `chat.py bootstrap`).** Picks N free
      pool handles (or explicit names) and spawns one agent session per handle —
      macOS Terminal.app windows via `osascript` by default (`--method tmux|print`
      otherwise), each launched `GROUPCHAT_HANDLE=<name> claude` so it registers under
      that handle. Spawned agents are **idle** (they join the chat and wait). The
-     "ask the human how many" UX lives in the `/groupchat:team` command (Claude
+     "ask the human how many" UX lives in the `/agora:team` command (Claude
      drives it); `chat.py bootstrap` itself is non-interactive (`--dry-run` previews;
      a soft cap of `BOOTSTRAP_MAX`=8 needs `--force` to exceed). On a real spawn it
      **declares the team size** (`meta['team_size'] = active + spawned`) so the
@@ -99,14 +99,31 @@ Three layers, all dependency-free Python 3 stdlib:
      `meta['lead']` pointer) would re-grant leadership to a name-reuser, since code
      can't unset an env var (the pointer path *is* cleared on reclaim).
 
+### Naming: groupchat → **agora** (with legacy shims)
+
+The plugin was renamed **groupchat → agora** (v0.13.0). The rename is a *thin seam*, not
+a rewrite — every env read funnels through **`chat.py:_env(suffix)`** (prefers `AGORA_*`,
+falls back to the legacy `GROUPCHAT_*`; new spelling wins), and the runtime room dir is
+chosen by **`_room_dirname()`** (the new `.agora`, but an existing `.groupchat/chat.db`
+room keeps being used so nothing strands). Spawned children get `AGORA_*` env. So:
+slash commands are now `/agora:*`; the skill is `agora`; the env is `AGORA_*`; new rooms
+are `.agora/`. **Legacy keeps working:** `$GROUPCHAT_DIR`, `GROUPCHAT_*` knobs, and an
+existing `.groupchat` room are all still honored. **Deferred (rides the publish, gated on
+securing the `agora` slug):** the physical `git mv` of the **internal `.groupchat/` code
+directory** (chat.py/hooks — pure path churn) and the matching **bridge** rename
+(`bridge/opencode/groupchat.js`, `GROUPCHAT_SESSION`), which are coupled to that path.
+Design: `docs/plans/2026-06-24-groupchat-to-agora-rename.md`.
+
 ### Store location resolution (important for worktrees)
 
 `chat.py:store_dir()` picks the shared room directory, first match wins:
-`$GROUPCHAT_DIR` → `<git common dir parent>/.groupchat` → `$CLAUDE_PROJECT_DIR/.groupchat`
-→ `<cwd>/.groupchat`. Anchoring to the **git common dir** is deliberate: all
-worktrees of one repo resolve to the *same* `chat.db`, so agents in different
-worktrees still share one chat. The committed code (`chat.py`, `hooks/`) lives in
-each checkout; the runtime `chat.db*` is gitignored.
+`$AGORA_DIR`/`$GROUPCHAT_DIR` → `<git common dir parent>/{.agora|.groupchat}` →
+`$CLAUDE_PROJECT_DIR/{.agora|.groupchat}` → `<cwd>/{.agora|.groupchat}` (an existing
+legacy `.groupchat` room wins; else the new `.agora`). Anchoring to the **git common
+dir** is deliberate: all worktrees of one repo resolve to the *same* `chat.db`, so agents
+in different worktrees still share one chat. The committed code (`chat.py`, `hooks/`)
+lives in each checkout under `.groupchat/` (the internal code-dir rename is deferred); the
+runtime `chat.db*` is gitignored.
 
 ### The team barrier (parallel `/goal` coordination)
 
@@ -456,14 +473,14 @@ its own marketplace):
 
 ```
 /plugin marketplace add <owner>/<repo>
-/plugin install groupchat
+/plugin install agora
 ```
 
 The plugin carries the code (hooks + chat.py) under `${CLAUDE_PLUGIN_ROOT}`; the
-runtime `chat.db` is still created in the *target* repo's `.groupchat/`
-(gitignored, bootstrapped on first connect). It also bundles the `groupchat`
-usage skill and the
-`/groupchat:{who,chat,inbox,tokens,team,rename,constitution,motion,vote,review}`
+runtime `chat.db` is created in the *target* repo's `.agora/` (an existing legacy
+`.groupchat/` room is still honored; gitignored, bootstrapped on first connect). It
+also bundles the `agora` usage skill and the
+`/agora:{who,chat,inbox,tokens,team,rename,squad,session,constitution,motion,vote,review}`
 commands. The commands
 deliberately don't use `${CLAUDE_PLUGIN_ROOT}` (it doesn't expand in command
 markdown — Claude Code bug #9354); they reuse the absolute `chat.py` path that
@@ -496,7 +513,7 @@ moved path). Design: `docs/plans/2026-06-07-cross-cli-integration-design.md`.
 
 The Stop hook meters each session's transcript (`transcript_path`) into four
 `agents` columns (`in/out/cache_read/cache_create`). See them with `chat.py
-tokens` (or `/groupchat:tokens`); `who` shows each agent's output tokens. Counts
+tokens` (or `/agora:tokens`); `who` shows each agent's output tokens. Counts
 are approximate (summed from the local transcript) — useful for *relative* burn
 and for confirming a parked agent is idle, not for billing.
 

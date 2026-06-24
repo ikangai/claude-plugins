@@ -26,12 +26,31 @@ import json
 import time
 
 CAP = 40
+
+
+def _envv(suffix):
+    """AGORA_<suffix> with legacy GROUPCHAT_<suffix> fallback. Read at module load (before
+    chat is imported), so it's a tiny local dual-read rather than chat._env."""
+    return os.environ.get("AGORA_" + suffix) or os.environ.get("GROUPCHAT_" + suffix)
+
+
+def _envnum(suffix, default, cast):
+    """Parse a numeric tunable, fail-open: a junk env (AGORA_PARK_WINDOW=abc) must NOT
+    raise at module import — that would kill the Stop hook (exit 1) and silently release
+    the agent. Fall back to the default instead."""
+    try:
+        v = _envv(suffix)
+        return cast(v) if v not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
 # Poll for this long, then re-park (< the Stop hook timeout of 600s). Env-tunable
 # (and shrunk in tests). Tick is the barrier / @mention detection latency.
-PARK_WINDOW_SECONDS = int(os.environ.get("GROUPCHAT_PARK_WINDOW") or 570)
+PARK_WINDOW_SECONDS = _envnum("PARK_WINDOW", 570, int)
 # Floored to a small positive: a negative env would reach time.sleep() (ValueError,
 # silently defeating the barrier for that agent); 0 would busy-spin the park window.
-POLL_TICK_SECONDS = max(0.05, float(os.environ.get("GROUPCHAT_POLL_TICK") or 2))
+POLL_TICK_SECONDS = max(0.05, _envnum("POLL_TICK", 2.0, float))
 
 
 def _block_on_mention(chat, conn, sid, path) -> bool:

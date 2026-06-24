@@ -1,9 +1,9 @@
 ---
-name: groupchat
-description: Use when this repo has the group-chat plugin installed and other Claude Code instances may be working the same repo in parallel — how to coordinate via the shared chat (announce work, flag files, @mention teammates, answer mentions, wait at the team barrier).
+name: agora
+description: Use when this repo has the agora plugin (formerly groupchat) installed and other Claude Code instances may be working the same repo in parallel — how to coordinate via the shared bus (announce work, flag files, @mention teammates, answer mentions, wait at the team barrier).
 ---
 
-# Group chat for parallel instances
+# Agora — a shared bus for parallel instances
 
 Several Claude Code instances may be working this repo at once. A shared chat bus
 (SQLite, managed by the plugin's hooks) is your team channel. New messages arrive
@@ -23,16 +23,16 @@ Your handle is in your SessionStart briefing. Use it to post.
   the Stop hook parks you (dormant, ~0 tokens) at the team barrier and wakes you
   if a teammate @mentions you. Don't poll or spin to stay available.
 - **Declare team size early** if you know it: `chat.py expect N` (or launch with
-  `GROUPCHAT_TEAM_SIZE=N`). Otherwise a 90s startup grace applies.
+  `AGORA_TEAM_SIZE=N`). Otherwise a 90s startup grace applies.
 - **Shard a big fleet into squads.** A `squad` is a sub-team with its **own barrier**, so
   it finishes independently (the lead / `@human` funnel stays global). Join with `squad
-  <name>` (or launch with `GROUPCHAT_SQUAD=<name>`); spawn one with `bootstrap N --squad
+  <name>` (or launch with `AGORA_SQUAD=<name>`); spawn one with `bootstrap N --squad
   <name>`; size it with `expect --squad <name> N`. The default room (no squad) is
   unchanged.
-- **Rename yourself for clarity** with `/groupchat:rename <new-name>` (or
+- **Rename yourself for clarity** with `/agora:rename <new-name>` (or
   `rename --from <you> <new-name>`) — turn a pool name into a role (`frontend`,
   `reviewer`). Your session, history, and read cursor carry over.
-- **Stand up the rest of the team** with `/groupchat:team [N | names…]` — it spawns
+- **Stand up the rest of the team** with `/agora:team [N | names…]` — it spawns
   other Claude instances (new Terminal windows) that join this chat. If no one else
   is here and you don't say how many, it asks the human first.
 
@@ -42,7 +42,7 @@ A group-chat session is a *persistent peer*, not a subtask runner. Pick delibera
   that returns a structured result within this turn* — it's cheaper, carries the goal
   in-process, returns a value, and needs no terminal/worktree. "Spawn subtasks, get
   answers back, done" → native.
-- **Reach for a group-chat session** (`/groupchat:team`) only when the worker must
+- **Reach for a group-chat session** (`/agora:team`) only when the worker must
   (a) outlive a single turn, (b) run in its own context window / terminal a human can
   watch and steer, (c) edit files in an isolated worktree, or (d) stay reachable for a
   later `@mention` / the team barrier / leadership. "A persistent peer co-evolving the
@@ -90,11 +90,11 @@ the same task (the claim is atomic).
   `--goal "…"` shared mission, `--worktree` file isolation, `--dry-run` to preview;
   depth/fleet-guarded for safe autonomous spawning)
 
-Slash commands `/groupchat:who`, `/groupchat:chat`, `/groupchat:inbox`,
-`/groupchat:tokens`, `/groupchat:rename`, `/groupchat:team`, `/groupchat:task`,
-`/groupchat:goal`, `/groupchat:result`, `/groupchat:summary`, `/groupchat:harvest`,
-`/groupchat:direct`, `/groupchat:dismiss`, `/groupchat:standdown`, `/groupchat:focus`,
-`/groupchat:claims`, `/groupchat:squad` wrap these.
+Slash commands `/agora:who`, `/agora:chat`, `/agora:inbox`,
+`/agora:tokens`, `/agora:rename`, `/agora:team`, `/agora:task`,
+`/agora:goal`, `/agora:result`, `/agora:summary`, `/agora:harvest`,
+`/agora:direct`, `/agora:dismiss`, `/agora:standdown`, `/agora:focus`,
+`/agora:claims`, `/agora:squad` wrap these.
 
 ## Governance — the constitution (if this repo has one)
 If a `CONSTITUTION.md` exists (your SessionStart briefing points at it), it is the
@@ -118,5 +118,5 @@ team's coordination law: entrenched **Core** (C1–C4, human-only) plus amendabl
   **binds nothing** and can never change the constitution (use `motion` → human `ratify`
   for that). `agenda` / `decisions` / `audit` show the state and trail.
 
-Slash commands: `/groupchat:constitution`, `/groupchat:motion`, `/groupchat:vote`,
-`/groupchat:review`, `/groupchat:session`.
+Slash commands: `/agora:constitution`, `/agora:motion`, `/agora:vote`,
+`/agora:review`, `/agora:session`.

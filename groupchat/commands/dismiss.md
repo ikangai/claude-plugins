@@ -4,7 +4,7 @@ argument-hint: <handle>
 ---
 `dismiss` releases a single teammate from the team barrier, so a long-running
 orchestrator doesn't pin its finished workers in place until the park ceiling. Use the
-group-chat CLI path from your SessionStart briefing as `<cli>` and your handle as
+agora CLI path from your SessionStart briefing as `<cli>` and your handle as
 `<you>`.
 
 Run `<cli> dismiss <handle> --from <you>`. It marks that agent done (so it no longer

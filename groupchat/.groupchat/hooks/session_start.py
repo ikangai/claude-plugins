@@ -32,7 +32,7 @@ def main():
     # (worth announcing) from a resume (must NOT re-announce).
     existed = chat.agent_by_session(conn, sid) is not None
     handle = chat.register(conn, sid, cwd=cwd, pid=os.getppid(),
-                           handle=(os.environ.get("GROUPCHAT_HANDLE") or None))
+                           handle=(chat._env("HANDLE") or None))
     agent = chat.agent_by_session(conn, sid)
     path = os.path.abspath(chat.__file__)
 

@@ -135,9 +135,12 @@ def check_barrier_smoke(rep: Report, chat):
     if chat is None:
         rep.warn("skipped — chat.py did not import")
         return
-    saved = os.environ.get("GROUPCHAT_DIR")
+    saved = {k: os.environ.get(k) for k in ("GROUPCHAT_DIR", "AGORA_DIR")}
     with tempfile.TemporaryDirectory(prefix="gc_doctor_") as tmp:
-        os.environ["GROUPCHAT_DIR"] = os.path.join(tmp, ".groupchat")
+        # Set BOTH spellings — AGORA_DIR wins in store_dir, so leaving an ambient one
+        # would point this probe at the operator's real room instead of the throwaway.
+        room = os.path.join(tmp, ".agora")
+        os.environ["GROUPCHAT_DIR"] = os.environ["AGORA_DIR"] = room
         try:
             conn = chat.connect()
             for name, fn in (
@@ -154,10 +157,9 @@ def check_barrier_smoke(rep: Report, chat):
                              "— the team barrier is dead (fails open in stop.py)")
             conn.close()
         finally:
-            if saved is None:
-                os.environ.pop("GROUPCHAT_DIR", None)
-            else:
-                os.environ["GROUPCHAT_DIR"] = saved
+            for k, v in saved.items():
+                (os.environ.__setitem__(k, v) if v is not None
+                 else os.environ.pop(k, None))
 
 
 # --------------------------------------------------------------------------- #
@@ -186,7 +188,9 @@ def check_hooks_fail_open(rep: Report):
     saved = os.environ.get("GROUPCHAT_DIR")
     with tempfile.TemporaryDirectory(prefix="gc_doctor_") as tmp:
         env = dict(os.environ)
-        env["GROUPCHAT_DIR"] = os.path.join(tmp, ".groupchat")
+        # Both spellings — AGORA_DIR wins in store_dir, so a copied-in ambient one
+        # would shadow GROUPCHAT_DIR and aim the probe at the real room.
+        env["GROUPCHAT_DIR"] = env["AGORA_DIR"] = os.path.join(tmp, ".agora")
         env.pop("CLAUDE_PROJECT_DIR", None)
         for h in HOOK_FILES:
             p = os.path.join(HOOKS_DIR, h)

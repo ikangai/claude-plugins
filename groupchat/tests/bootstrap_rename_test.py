@@ -9,7 +9,7 @@ Two features under test:
     identity rules (sanitize / reserved-reject / active-collision-reject /
     inactive-reclaim), with leadership and the read cursor following the rename.
   * `bootstrap` — pick free team-member handles and (here, via --dry-run/print, so
-    nothing actually launches) emit the right `GROUPCHAT_HANDLE=… claude` commands.
+    nothing actually launches) emit the right `AGORA_HANDLE=… claude` commands.
 """
 import os
 import sqlite3
@@ -156,7 +156,7 @@ def test_bootstrap_dry_run():
               len(names) == 3 and len(set(names)) == 3, r.stdout)
         check("dry-run reports 'would spawn'", "would spawn 3/3" in r.stdout, r.stdout)
         check("dry-run emits a GROUPCHAT_HANDLE launch command per agent",
-              r.stdout.count("GROUPCHAT_HANDLE=") == 3, r.stdout)
+              r.stdout.count("AGORA_HANDLE=") == 3, r.stdout)
 
         # Explicit names: an active handle gets collision-suffixed.
         register(env, "ada")
@@ -284,7 +284,7 @@ def test_bootstrap_worktree_dry_run():
         check("each agent launches cd'd into its own worktree dir",
               "proj-worktrees" in r.stdout, r.stdout)
         check("still emits a GROUPCHAT_HANDLE launch per agent",
-              r.stdout.count("GROUPCHAT_HANDLE=") == 2, r.stdout)
+              r.stdout.count("AGORA_HANDLE=") == 2, r.stdout)
 
 
 def test_worktree_creation_isolates_files():

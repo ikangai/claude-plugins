@@ -46,6 +46,11 @@ _SCRUB = (
 def env_for(root: str, **extra) -> dict:
     """A clean environment pointing the bus at an isolated dir under ``root``."""
     env = dict(os.environ)
+    # Scrub BOTH spellings (groupchat→agora rename) so a parent session's AGORA_TEAM_SIZE
+    # etc. can't skew a barrier assertion; the explicit _SCRUB list documents the knobs.
+    for k in list(env):
+        if k.startswith("GROUPCHAT_") or k.startswith("AGORA_"):
+            env.pop(k, None)
     env["GROUPCHAT_DIR"] = os.path.join(root, ".groupchat")
     env.pop("CLAUDE_PROJECT_DIR", None)
     for k in _SCRUB:

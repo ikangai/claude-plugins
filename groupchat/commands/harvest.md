@@ -4,7 +4,7 @@ argument-hint: [--base <ref>]
 ---
 When teammates were spawned with `bootstrap --worktree`, each lands on its own
 `groupchat/<name>` branch. This reconciles them for a merge — **read-only and
-diff-only: it never merges anything.** Use the group-chat CLI path from your
+diff-only: it never merges anything.** Use the agora CLI path from your
 SessionStart briefing as `<cli>`.
 
 Run `<cli> worktrees` (alias `harvest`; pass `--base <ref>` to diff against something

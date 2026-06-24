@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""groupchat — a shared chat bus for parallel Claude Code instances on one repo.
+"""agora (formerly groupchat) — a shared bus for parallel Claude Code instances on one repo.
 
 All instances working on the same repository share a single SQLite database on
 disk. Each instance ("agent") gets a short, memorable handle (e.g. ``curie``).
@@ -10,11 +10,13 @@ This file is BOTH:
   * an importable module (the hook scripts ``import chat`` and call functions), and
   * a command-line tool (``python3 chat.py <command> ...``).
 
-Storage location resolution (first match wins):
-  1. ``$GROUPCHAT_DIR``                         — explicit override
-  2. ``<git common dir parent>/.groupchat``     — shared across all worktrees
-  3. ``$CLAUDE_PROJECT_DIR/.groupchat``         — project root when run via a hook
-  4. ``<cwd>/.groupchat``                       — fallback
+Env + storage honor the new ``AGORA_*`` / ``.agora`` names with the legacy
+``GROUPCHAT_*`` / ``.groupchat`` as a fallback (new spelling wins) — see ``_env`` /
+``_room_dirname``. Storage location resolution (first match wins):
+  1. ``$AGORA_DIR`` / ``$GROUPCHAT_DIR``               — explicit override
+  2. ``<git common dir parent>/{.agora|.groupchat}``   — shared across all worktrees
+  3. ``$CLAUDE_PROJECT_DIR/{.agora|.groupchat}``        — project root when run via a hook
+  4. ``<cwd>/{.agora|.groupchat}``                      — fallback
 
 Design goals: zero third-party dependencies (Python 3 stdlib only), safe under
 concurrent access (WAL + busy timeout), and never crash a Claude session — the
@@ -92,9 +94,33 @@ MAX_PARK_SECONDS = 2 * 60 * 60    # ceiling: release a parked agent after this m
 # --------------------------------------------------------------------------- #
 # Storage location & connection
 # --------------------------------------------------------------------------- #
+def _env(name: str, default: str | None = None) -> str | None:
+    """Read an env var by its SUFFIX, honoring the new ``AGORA_*`` names with the legacy
+    ``GROUPCHAT_*`` as a fallback (new spelling wins). Accepts either full spelling — the
+    prefix is stripped — so ``_env('SQUAD')`` / ``_env('GROUPCHAT_SQUAD')`` both check
+    ``AGORA_SQUAD`` then ``GROUPCHAT_SQUAD``. This is the whole backward-compat seam for
+    the groupchat→agora rename: every env read goes through here."""
+    suffix = name.split("_", 1)[1] if name.startswith(("AGORA_", "GROUPCHAT_")) else name
+    v = os.environ.get("AGORA_" + suffix)
+    if v is None:
+        v = os.environ.get("GROUPCHAT_" + suffix)
+    return default if v is None else v
+
+
+def _room_dirname(anchor: str) -> str:
+    """The runtime room dir under ``anchor``: the new ``.agora`` by default, but an
+    EXISTING legacy ``.groupchat`` room (its chat.db present) keeps being used so the
+    rename never strands an old room. An existing ``.agora`` wins over a legacy one."""
+    if os.path.isfile(os.path.join(anchor, ".agora", "chat.db")):
+        return ".agora"
+    if os.path.isfile(os.path.join(anchor, ".groupchat", "chat.db")):
+        return ".groupchat"
+    return ".agora"
+
+
 def store_dir() -> str:
     """Return the directory holding the shared chat database for this repo."""
-    env = os.environ.get("GROUPCHAT_DIR")
+    env = _env("DIR")  # AGORA_DIR, else legacy GROUPCHAT_DIR
     if env:
         return os.path.abspath(env)
 
@@ -118,15 +144,16 @@ def store_dir() -> str:
             git_common = os.path.abspath(out)
             # parent of the .git dir == main worktree root
             root = os.path.dirname(git_common) or os.getcwd()
-            return os.path.join(root, ".groupchat")
+            return os.path.join(root, _room_dirname(root))
     except Exception:
         pass
 
     cpd = os.environ.get("CLAUDE_PROJECT_DIR")
     if cpd and os.path.isdir(cpd):
-        return os.path.join(os.path.abspath(cpd), ".groupchat")
+        root = os.path.abspath(cpd)
+        return os.path.join(root, _room_dirname(root))
 
-    return os.path.join(os.getcwd(), ".groupchat")
+    return os.path.join(os.getcwd(), _room_dirname(os.getcwd()))
 
 
 def db_path() -> str:
@@ -350,7 +377,7 @@ def _env_int(name: str, default: int | None = None) -> int | None:
     ``stop.py`` swallowed (fail-open), silently killing the team barrier. Keep it
     single. (See .dev-diary/2026-06-07-test-harness-and-the-dead-barrier.md.)
     """
-    v = os.environ.get(name)
+    v = _env(name)  # AGORA_* with GROUPCHAT_* legacy fallback
     if v in (None, ""):
         return default
     try:
@@ -525,8 +552,8 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
                 "first_seen, last_seen, last_read_id, spawn_depth, spawned_by, parks, squad) "
                 "VALUES (?,?,?,?,?,?,?, (SELECT COALESCE(MAX(id),0) FROM messages), ?, ?, ?, ?)",
                 (session_id, h, cwd, pid, status, ts, ts,
-                 current_spawn_depth(), os.environ.get("GROUPCHAT_SPAWNED_BY") or None,
-                 1 if parks else 0, _norm_squad(os.environ.get("GROUPCHAT_SQUAD"))),
+                 current_spawn_depth(), _env("SPAWNED_BY") or None,
+                 1 if parks else 0, _norm_squad(_env("SQUAD"))),
             )
             conn.commit()
             _clear_stale_team_size(conn, session_id)
@@ -719,14 +746,15 @@ def _spawn_command(name: str, cwd: str, prompt: str | None,
                    squad: str | None = None) -> str:
     """The shell command a spawned session runs: cd into the repo and launch claude
     with its handle pre-set, so its SessionStart hook registers it under ``name``.
-    ``GROUPCHAT_SPAWN_DEPTH``/``GROUPCHAT_SPAWNED_BY`` carry the spawn lineage; ``squad``
-    (``GROUPCHAT_SQUAD``) puts the child in a sub-team with its own barrier."""
+    ``AGORA_SPAWN_DEPTH``/``AGORA_SPAWNED_BY`` carry the spawn lineage; ``squad``
+    (``AGORA_SQUAD``) puts the child in a sub-team with its own barrier. (The child reads
+    the new ``AGORA_*`` names; legacy ``GROUPCHAT_*`` is still honored if a human sets it.)"""
     claude = shutil.which("claude") or "claude"
-    env = f"GROUPCHAT_HANDLE={name} GROUPCHAT_SPAWN_DEPTH={int(depth)}"
+    env = f"AGORA_HANDLE={name} AGORA_SPAWN_DEPTH={int(depth)}"
     if spawned_by:
-        env += f" GROUPCHAT_SPAWNED_BY={shlex.quote(spawned_by)}"
+        env += f" AGORA_SPAWNED_BY={shlex.quote(spawned_by)}"
     if squad:
-        env += f" GROUPCHAT_SQUAD={shlex.quote(squad)}"
+        env += f" AGORA_SQUAD={shlex.quote(squad)}"
     cmd = f"cd {shlex.quote(cwd)} && {env} {shlex.quote(claude)}"
     if prompt:
         cmd += " " + shlex.quote(prompt)
@@ -1570,7 +1598,7 @@ def resolve_lead(conn) -> str | None:
     pointer = (get_meta(conn, "lead") or "").strip().lower()
     if pointer and pointer in active_handles:
         return pointer
-    env = (os.environ.get("GROUPCHAT_LEAD") or "").strip().lower()
+    env = (_env("LEAD") or "").strip().lower()
     if env and env in active_handles:
         return env
     return min(acts, key=lambda a: (a["first_seen"] or "", a["handle"]))["handle"]
@@ -2067,8 +2095,8 @@ def cmd_who(args):
     # implicit floor, so flat / floor-only rooms stay uncluttered (no surprise crown).
     lead = resolve_lead(conn)
     _ptr = (get_meta(conn, "lead") or "").strip().lower()
-    _env = (os.environ.get("GROUPCHAT_LEAD") or "").strip().lower()
-    explicit_lead = lead if (lead and lead in (_ptr, _env)) else None
+    _envlead = (_env("LEAD") or "").strip().lower()
+    explicit_lead = lead if (lead and lead in (_ptr, _envlead)) else None
     chat_ages = last_chat_ages(conn)        # one grouped query, not N
     solo = len(actives) <= 1                # the quiet ◐ has no consumer when alone
     for r in rows:
@@ -2219,7 +2247,7 @@ def cmd_lead(args):
         conn.close()
         return 0
     pointer = (get_meta(conn, "lead") or "").strip().lower()
-    env = (os.environ.get("GROUPCHAT_LEAD") or "").strip().lower()
+    env = (_env("LEAD") or "").strip().lower()
     actives = {x["handle"] for x in active_agents(conn)}
     if pointer and pointer in actives:
         why = "claimed / designated"
@@ -2762,7 +2790,7 @@ def cmd_bootstrap(args):
 
     # Thread spawn lineage to the children: their depth is ours + 1, and we record
     # ourselves as the spawner (the agent running bootstrap, if it has a handle).
-    spawner = os.environ.get("GROUPCHAT_HANDLE") or "bootstrap"
+    spawner = _env("HANDLE") or "bootstrap"
     results = spawn_agents(names, cwd, method=method, prompt=args.prompt,
                            dry_run=args.dry_run, worktree=args.worktree,
                            prompts=(prompt_map or None),
@@ -2797,7 +2825,7 @@ def cmd_bootstrap(args):
         if getattr(args, "goal", None):
             print(f"Shared goal: {args.goal} "
                   "(every agent sees it in their briefing and `who`).")
-        env_sz = (os.environ.get("GROUPCHAT_TEAM_SIZE") or "").strip()
+        env_sz = (_env("TEAM_SIZE") or "").strip()
         if env_sz:
             print(f"  note: $GROUPCHAT_TEAM_SIZE={env_sz} in your environment "
                   f"overrides this — the barrier will use {env_sz}.")
@@ -2887,7 +2915,7 @@ def cmd_install(args):
         for f in os.listdir(os.path.join(src, "hooks")):
             if f.endswith(".py"):
                 shutil.copy2(os.path.join(src, "hooks", f), os.path.join(hooks_dst, f))
-        print(f"copied group-chat files -> {dst}")
+        print(f"copied agora files -> {dst}")
     else:
         print(f"using existing files at {dst}")
 
@@ -2908,8 +2936,8 @@ def cmd_install(args):
         fh.write("\n")
     print(f"{'added' if added else 'no new'} hook(s) in {settings_path}"
           + (f" (+{added})" if added else ""))
-    print("Done. Open Claude Code in this repo (restart the session) and the "
-          "group chat is live for every instance.")
+    print("Done. Open Claude Code in this repo (restart the session) and agora "
+          "is live for every instance.")
     return 0
 
 
@@ -3087,7 +3115,7 @@ def cmd_constitution(args):
 
 def _env_float(name: str, default: float) -> float:
     try:
-        v = os.environ.get(name)
+        v = _env(name)  # AGORA_* with GROUPCHAT_* legacy fallback (like _env_int)
         return float(v) if v not in (None, "") else default
     except (TypeError, ValueError):
         return default

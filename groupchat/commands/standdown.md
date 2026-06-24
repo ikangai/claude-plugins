@@ -4,7 +4,7 @@ argument-hint: ["optional reason" | --clear]
 ---
 `standdown` tells every agent it may stop now: each parked teammate is released from the
 team barrier within a poll tick, instead of waiting for the whole team to finish. Use
-the group-chat CLI path from your SessionStart briefing as `<cli>`.
+the agora CLI path from your SessionStart briefing as `<cli>`.
 
 - **Declare it** (optionally with a reason from `$ARGUMENTS`) → `<cli> standdown "<reason>"`.
 - **Lift it** → `<cli> standdown --clear` (the barrier goes back to normal).

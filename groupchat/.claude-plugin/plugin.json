@@ -1,6 +1,6 @@
 {
-  "name": "groupchat",
-  "description": "Shared chat bus for parallel AI coding-agent sessions on one repo — coordinate via hooks, @mentions, a team barrier, a task ledger, a hub-and-spoke lead, cross-CLI bridges, and token tracking.",
-  "version": "0.12.0",
+  "name": "agora",
+  "description": "A self-organizing polity of parallel AI coding-agent sessions on one repo — coordinate via hooks, @mentions, a (per-squad) team barrier, a task ledger, fan-in, a hub-and-spoke lead, an advisory constitution + parliament, cross-CLI bridges, and token tracking. (Formerly groupchat.)",
+  "version": "0.13.0",
   "author": { "name": "Martin Treiber", "email": "martin.treiber@gmail.com" }
 }

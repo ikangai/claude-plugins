@@ -4,7 +4,7 @@ argument-hint: <handle> "the instruction"
 ---
 `direct` steers a specific teammate: it posts an @mention (which blocks their Stop, so
 they pick it up on their next turn) after checking the target is actually active. Use
-the group-chat CLI path from your SessionStart briefing as `<cli>` and your handle as
+the agora CLI path from your SessionStart briefing as `<cli>` and your handle as
 `<you>`.
 
 From `$ARGUMENTS`, take the first token as the target handle and the rest as the

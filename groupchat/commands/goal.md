@@ -4,7 +4,7 @@ argument-hint: ["the objective" | --clear]
 ---
 The shared **goal** is the one-line objective every agent sees in its briefing and in
 `who`, so a teammate who joins late (or was bootstrapped idle) inherits the mission
-without a human retyping it. Use the group-chat CLI path from your SessionStart
+without a human retyping it. Use the agora CLI path from your SessionStart
 briefing as `<cli>`.
 
 - **Empty `$ARGUMENTS`** → `<cli> goal` and show the current goal verbatim.

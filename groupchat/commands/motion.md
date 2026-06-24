@@ -1,7 +1,7 @@
 ---
 description: Propose an amendment to the constitution (advisory; evidence required)
 ---
-Propose a constitution amendment via the group-chat CLI (path from your
+Propose a constitution amendment via the agora CLI (path from your
 SessionStart briefing). Use one of:
 
 - amend:  `motion --from <your handle> --rule R<n> --change "<new text>" --because "<evidence>"`

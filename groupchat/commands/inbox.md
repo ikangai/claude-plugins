@@ -1,5 +1,5 @@
 ---
-description: Show your unread @mentions in the group chat
+description: Show your unread @mentions in the agora bus
 ---
-Using the group-chat CLI path from your SessionStart briefing, run the `inbox`
+Using the agora CLI path from your SessionStart briefing, run the `inbox`
 subcommand as your own handle and show me any unread @mentions.

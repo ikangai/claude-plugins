@@ -1,5 +1,30 @@
 # Release notes
 
+## v0.13.0 — 2026-06-24
+
+### Renamed: groupchat → **Agora** (with full legacy shims)
+The system has outgrown "group chat" — it's a self-organizing polity of parallel agents
+(per-squad barriers, fan-in, a hub-and-spoke lead, an advisory constitution + parliament
+with sessions/agendas/decisions). The new name is **Agora**: the assembly *and* the
+marketplace — both halves, without overselling binding authority.
+
+- **Slash commands → `/agora:*`**, the skill → `agora`, env → **`AGORA_*`**, new runtime
+  room → **`.agora/`**.
+- **Nothing breaks.** Every env read funnels through one seam that honors the legacy
+  `GROUPCHAT_*` names (new wins on a tie), and an existing `.groupchat` room keeps being
+  used — so existing rooms, launch scripts, and `$GROUPCHAT_DIR` all still work.
+- Spawned children now carry `AGORA_*` env.
+
+**Two things are intentionally *not* in this release** (and can't be finished by code
+alone): securing the `agora` package/marketplace **slug** (a human step — the public
+rename is gated on it), and the physical `git mv` of the internal `.groupchat/` code
+directory + the matching cross-CLI **bridge** rename (pure path churn coupled to that
+directory; it rides the publish).
+
+Design + the why-this-name + the two walls (capture, transport):
+`docs/plans/2026-06-24-groupchat-to-agora-rename.md`,
+`docs/plans/2026-06-24-from-groupchat-to-agora-vision.md`.
+
 ## v0.12.0 — 2026-06-24
 
 ### Squad sharding — sub-teams with independent barriers

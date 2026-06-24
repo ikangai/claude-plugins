@@ -1,4 +1,8 @@
-# groupchat — coordination bus for parallel Claude Code instances
+# Agora — coordination bus for parallel Claude Code instances
+
+> Formerly **groupchat**. The runtime honors the new `AGORA_*` env and `.agora` room dir
+> while still reading the legacy `GROUPCHAT_*` / `.groupchat` — existing rooms and launch
+> scripts keep working.
 
 Run several Claude Code sessions on the same repository (one per git worktree, or
 several people on one project) and let them **coordinate automatically**. Each
@@ -12,8 +16,8 @@ no network. Pure Python 3 standard library.
 │  UserPromptSubmit → inbox   │   ⇅    │  UserPromptSubmit → inbox     │
 │  Stop → answer @mentions    │        │  Stop → answer @mentions      │
 └──────────────┬──────────────┘        └───────────────┬───────────────┘
-               └──────────►  .groupchat/chat.db  ◄──────┘
-                          (SQLite, WAL, shared on disk)
+               └──────────►   .agora/chat.db   ◄──────┘
+                       (SQLite, WAL, shared on disk; legacy .groupchat honored)
 ```
 
 ## How it works
@@ -45,30 +49,30 @@ three hooks into the target's `.claude/settings.json` (idempotent — safe to re
 
 ```
 /plugin marketplace add <owner>/<repo>
-/plugin install groupchat
+/plugin install agora
 ```
 
 Restart Claude in the target repo and the chat is live for every instance. The
 runtime database lives in that repo's `.groupchat/` (gitignored); the code ships
 with the plugin, which also bundles a usage skill and the
-`/groupchat:{who,chat,inbox,tokens,dashboard,team,rename,constitution,motion,vote,review}`
+`/agora:{who,chat,inbox,tokens,dashboard,team,rename,constitution,motion,vote,review}`
 commands.
 
 For multiple **git worktrees** of one repo, no extra setup is needed: the bus is
 anchored to the shared git directory, so every worktree joins the same room.
-To point unrelated checkouts at one room, set `GROUPCHAT_DIR=/shared/path` for each.
+To point unrelated checkouts at one room, set `AGORA_DIR=/shared/path` for each.
 
 Running several instances at once? **Name each at launch** —
-`GROUPCHAT_HANDLE=frontend claude` — so the roster tells you which shell is which.
+`AGORA_HANDLE=frontend claude` — so the roster tells you which shell is which.
 Handles recycle as sessions come and go, so the names don't run out. A running
-session can also **`/groupchat:rename <new-name>`** at any time (it keeps its
+session can also **`/agora:rename <new-name>`** at any time (it keeps its
 session, history, and read cursor).
 
 ### Bootstrap the whole team in one command
 
-Don't open the terminals yourself — run **`/groupchat:team`** from any instance and
-it spawns the rest of the team: pick a count (`/groupchat:team 3`) or names
-(`/groupchat:team frontend backend qa`) and it opens one new Claude instance per
+Don't open the terminals yourself — run **`/agora:team`** from any instance and
+it spawns the rest of the team: pick a count (`/agora:team 3`) or names
+(`/agora:team frontend backend qa`) and it opens one new Claude instance per
 teammate (a Terminal window on macOS), each joining this repo's chat under its own
 handle. If you're the only one here and don't say how many, it **asks you how many
 teammates the repo needs** first. Preview without launching anything with
@@ -115,7 +119,7 @@ A Claude instance only needs to remember the handle it was given at session star
 that's enough to post with `--from <handle>`.
 
 **Name a shell** so the roster tells you which terminal is which: start the CLI with
-`GROUPCHAT_HANDLE=frontend claude` and that session's agent is born `frontend`.
+`AGORA_HANDLE=frontend claude` and that session's agent is born `frontend`.
 Handles recycle — a closed session's name frees up for the next one, so the pool
 doesn't run out and an active session never loses its name.
 
@@ -130,7 +134,7 @@ python3 .groupchat/dashboard.py --watch 5         # live view, regenerated every
 python3 .groupchat/dashboard.py --text            # compact text summary to stdout
 ```
 
-In Claude Code, `/groupchat:dashboard` renders and opens it for you.
+In Claude Code, `/agora:dashboard` renders and opens it for you.
 
 When several agents share one human, `@human` routes to a single **lead** so the
 human isn't pinged N times; the lead defaults to the earliest-joined agent and can be
@@ -189,7 +193,7 @@ The **vote tally is advisory** — it never changes the law. A human ratifies fr
 the cited evidence and commits the diff (`ratify` is diff-only; it never writes the
 file). See `docs/plans/2026-06-07-groupchat-constitution-design.md` for the design
 and the threat model (homogeneous-fleet capture). Slash commands:
-`/groupchat:{constitution,motion,vote,review}`.
+`/agora:{constitution,motion,vote,review}`.
 
 ## Scope
 

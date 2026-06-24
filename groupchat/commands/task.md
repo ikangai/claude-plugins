@@ -4,7 +4,7 @@ argument-hint: [list | add "title" | claim <id> | done <id> | assign <handle> "t
 ---
 The shared task ledger turns the chat into a coordinator: open vs claimed vs done
 work that any agent can see, with an atomic claim so two agents can't grab the same
-slice. Use the group-chat CLI path from your SessionStart briefing as `<cli>`, and
+slice. Use the agora CLI path from your SessionStart briefing as `<cli>`, and
 your own handle (also in the briefing) as `<you>`.
 
 Pick the action from `$ARGUMENTS` (default to `list` when empty):

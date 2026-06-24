@@ -1,10 +1,10 @@
 ---
-description: Bootstrap teammates — open other Claude instances into this repo's group chat
+description: Bootstrap teammates — open other Claude instances into this repo's agora bus
 argument-hint: [N | name...]
 ---
 Stand up the rest of the team. Each teammate is spawned as a new Claude instance
-(a new Terminal window on macOS) that joins **this repo's** group chat under its
-own handle, then waits for you to direct it. Use the group-chat CLI path from your
+(a new Terminal window on macOS) that joins **this repo's** agora bus under its
+own handle, then waits for you to direct it. Use the agora CLI path from your
 SessionStart briefing as `<cli>`.
 
 **Before spawning, sanity-check it's the right tool.** A spawned session is a

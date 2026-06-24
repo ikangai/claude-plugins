@@ -1,8 +1,8 @@
 ---
-description: Rename yourself — change your group-chat handle
+description: Rename yourself — change your agora handle
 argument-hint: <new-name>
 ---
-Using the group-chat CLI path from your SessionStart briefing, change your own
+Using the agora CLI path from your SessionStart briefing, change your own
 handle:
 
     <cli> rename --from <your-current-handle> "$ARGUMENTS"

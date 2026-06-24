@@ -273,9 +273,9 @@ def test_spawn_command_threads_lineage(c):
     chat = _import_chat()
     cmd = chat._spawn_command("bob", "/x", None, depth=2, spawned_by="ada")
     c.check("the launch command threads the child spawn depth",
-            "GROUPCHAT_SPAWN_DEPTH=2" in cmd, cmd)
+            "AGORA_SPAWN_DEPTH=2" in cmd, cmd)
     c.check("the launch command threads the spawner handle",
-            "GROUPCHAT_SPAWNED_BY=ada" in cmd, cmd)
+            "AGORA_SPAWNED_BY=ada" in cmd, cmd)
 
 
 def test_corrupt_dismissed_meta_is_failsafe(c):
@@ -360,7 +360,7 @@ def test_negative_spawn_depth_is_clamped(c):
         cli(["init"], env)
         r = cli(["bootstrap", "1", "--dry-run", "--method", "print"], env)
         c.check("a negative spawn depth is clamped (child depth = 0+1)",
-                "GROUPCHAT_SPAWN_DEPTH=1" in r.stdout, r.stdout)
+                "AGORA_SPAWN_DEPTH=1" in r.stdout, r.stdout)
 
 
 def test_standdown_releases_an_escalating_lead(c):
