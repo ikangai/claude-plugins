@@ -1,4 +1,4 @@
-# bridge — run the group chat in any CLI agent, not just Claude Code
+# bridge — run agora in any CLI agent, not just Claude Code
 
 The chat bus (`.groupchat/chat.py`) is a dependency-free Python CLI, so it already
 runs anywhere. What differs per tool is the **seamless auto-delivery** — new

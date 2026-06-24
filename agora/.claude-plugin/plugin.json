@@ -1,6 +1,6 @@
 {
   "name": "agora",
   "description": "A self-organizing polity of parallel AI coding-agent sessions on one repo — coordinate via hooks, @mentions, a (per-squad) team barrier, a task ledger, fan-in, a hub-and-spoke lead, an advisory constitution + parliament, cross-CLI bridges, and token tracking. (Formerly groupchat.)",
-  "version": "0.15.0",
+  "version": "0.15.1",
   "author": { "name": "Martin Treiber", "email": "martin.treiber@gmail.com" }
 }

@@ -98,13 +98,18 @@ def test_captain_gated_until_chair_answers(c):
         chat, conn = _conn(root)
         try:
             # bob (captain) escalates @human -> routed to the chair, but KEPT so bob is gated
-            chat.send(conn, "bob", "@human is this API ok?", session_id="s_blead")
+            eid = chat.send(conn, "bob", "@human is this API ok?", session_id="s_blead")
             c.check("a captain's escalation parks it (open escalation)",
                     len(chat.session_open_escalations(conn, "s_blead")) >= 1,
                     str(chat.session_open_escalations(conn, "s_blead")))
-            # the CHAIR replying to the captain clears it (relaying the answer down)
-            chat.send(conn, "ada", "@bob yes, ship it", session_id="s_chair")
-            c.check("the chair's reply to the captain clears its escalation",
+            # an UNRELATED chair @mention must NOT clear it (B1 regression)
+            chat.send(conn, "ada", "@bob also please rebase", session_id="s_chair")
+            c.check("an unrelated chair @mention does NOT clear the captain's escalation",
+                    len(chat.session_open_escalations(conn, "s_blead")) >= 1,
+                    str(chat.session_open_escalations(conn, "s_blead")))
+            # the CHAIR relaying the answer (marked [re #id]) clears it
+            chat.send(conn, "ada", f"@bob [re #{eid}] yes, ship it", session_id="s_chair")
+            c.check("the chair's MARKED relay clears the captain's escalation",
                     len(chat.session_open_escalations(conn, "s_blead")) == 0,
                     str(chat.session_open_escalations(conn, "s_blead")))
         finally:
@@ -229,8 +234,8 @@ def test_answered_captain_stays_cleared_after_chair_change(c):
         _reg(root, env, "s_b", "bob", squad="backend")     # backend captain
         chat, conn = _conn(root)
         try:
-            chat.send(conn, "bob", "@human guidance?", session_id="s_b")   # captain → chair, gated
-            chat.send(conn, "ada", "@bob yes ship it", session_id="s_a")   # chair answers → cleared
+            eid = chat.send(conn, "bob", "@human guidance?", session_id="s_b")  # captain→chair, gated
+            chat.send(conn, "ada", f"@bob [re #{eid}] yes ship it", session_id="s_a")  # marked relay
             c.check("captain cleared after the chair answers",
                     len(chat.session_open_escalations(conn, "s_b")) == 0,
                     str(chat.session_open_escalations(conn, "s_b")))

@@ -1,5 +1,33 @@
 # Release notes
 
+## v0.15.1 — 2026-06-24 — review hardening
+
+A thorough whole-codebase implementation review (8 lenses, each finding adversarially
+verified; 24 confirmed) targeting the **seams between layers** and **system-wide
+invariants**. All confirmed findings fixed, TDD'd; full suite 34/34.
+
+**Blockers**
+- **Legacy-DB migration was broken** — `messages.session_id` lacked a guarded `ALTER`, so
+  any pre-existing `.groupchat` room (the kind `_room_dirname` *prefers*) raised on every
+  `send()`. Added the migration + a regression test that actually sends on a migrated db.
+- **Council escalation false-clear** — a captain's open `@human` was cleared by *any*
+  chair `@mention` (e.g. "@cap please rebase"), tearing its squad down with the operator's
+  question unanswered. Now a captain's escalation only clears on an explicit `[re #id]`
+  relay marker (which `answer` stamps); the chair relays with `answer <id> … --from <it>`.
+
+**Should-fix** — `ratify --confirm` is now caller-gated (operator/lead, like
+`standdown`); the park-ceiling marks a released lead `done` so it stops pinning teammates;
+the chair stays parked while it owes a captain a *relay* (not just while the @mention is
+unread); a stale `standdown` flag is cleared for a fresh cohort; `@team` is squad-scoped
+(`@all` stays fleet-wide); `inbox` is peek-only (the single cursor can't skip non-mention
+messages); a non-hook (`parks=0`) agent no longer becomes the emergent chair; the
+`dismissed` set is a dedicated table (atomic, no lost-update).
+
+**Nits** — fail-safe `mentions` parse in `format_message`; rename-hygiene sweep of runtime
+"group chat" → agora strings (briefing, hooks, doctor, bridge); a misleading
+`bootstrap --squad` env note; clearer ratify/`--from human` wording. Design:
+`docs/plans/2026-06-24-review-hardening.md`.
+
 ## v0.15.0 — 2026-06-24
 
 ### Per-squad leads + a chair-topped council

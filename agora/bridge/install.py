@@ -45,7 +45,7 @@ HOOK_OPTIONS = {
     "SessionStart": {"matcher": _SESSION_SOURCES, "timeout": 15},
     "UserPromptSubmit": {"timeout": 15},
     "Stop": {"timeout": 600,
-             "statusMessage": "⏳ waiting for teammates at the group-chat barrier…"},
+             "statusMessage": "⏳ waiting for teammates at the agora barrier…"},
 }
 
 
@@ -114,7 +114,7 @@ def install_codex(target: str) -> int:
             f"error: hook scripts not found under {hooks_dir}\n"
             f"  missing: {', '.join(missing)}\n"
             "  Install the bus first (`python3 .groupchat/chat.py install "
-            f"{target}` or the groupchat plugin), then re-run.",
+            f"{target}` or the agora plugin), then re-run.",
             file=sys.stderr,
         )
         return 1
@@ -137,7 +137,7 @@ def install_codex(target: str) -> int:
         fh.write("\n")
     print(f"{'added' if added else 'no new'} hook(s) in {cfg_path}"
           + (f" (+{added})" if added else ""))
-    print("Done. Open Codex in this repo and the group chat is live for every "
+    print("Done. Open Codex in this repo and agora is live for every "
           "Codex session — same bus, same handles as Claude Code.")
     return 0
 
@@ -221,7 +221,7 @@ delivery; otherwise just run it yourself at the top of each task.
 
 
 def _append_generic_snippet(target: str) -> int:
-    """Idempotently add the group-chat instruction block to ``<target>/AGENTS.md``,
+    """Idempotently add the agora instruction block to ``<target>/AGENTS.md``,
     preserving the human's own content. Shared by the generic and opencode hosts."""
     target = os.path.abspath(target)
     if not os.path.isfile(os.path.join(target, ".groupchat", "chat.py")):
@@ -234,12 +234,12 @@ def _append_generic_snippet(target: str) -> int:
         with open(agents_md) as fh:
             existing = fh.read()
     if GENERIC_BEGIN in existing:
-        print(f"no new content — AGENTS.md already has the group-chat block ({agents_md})")
+        print(f"no new content — AGENTS.md already has the agora block ({agents_md})")
         return 0
     sep = "" if not existing else ("\n" if existing.endswith("\n") else "\n\n")
     with open(agents_md, "w") as fh:
         fh.write(existing + sep + GENERIC_SNIPPET + "\n")
-    print(f"{'appended the' if existing else 'wrote a'} group-chat block to {agents_md}")
+    print(f"{'appended the' if existing else 'wrote a'} agora block to {agents_md}")
     print("Agents that read AGENTS.md will now register and pull messages each turn.")
     return 0
 

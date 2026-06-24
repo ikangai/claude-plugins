@@ -74,7 +74,7 @@ def _block_on_mention(chat, conn, sid, path) -> bool:
     body = chat.format_messages(shown, highlight=handle)
     extra = f"\n…{omitted} older message(s) omitted — see `log`." if omitted else ""
     reason = (
-        "A teammate mentioned you in the group chat and you haven't replied:\n"
+        "A teammate mentioned you in agora and you haven't replied:\n"
         + body + extra
         + "\n\nAddress the message(s). If a response is warranted, reply with:\n"
         + f'python3 "{path}" send --from {handle} "..."\n'
@@ -137,7 +137,14 @@ def main():
     #    Only a lead ever authors an unquoted @human (a worker's is redirected). The
     #    operator's reply (@<current handle>) wakes it via _block_on_mention above; the
     #    park ceiling still releases it as a fail-safe if the operator never replies.
+    #    A CHAIR also stays up while it owes a captain a relay (an escalation in flight TO
+    #    it that it has read but not yet relayed) — fail-safe so a slow query can't wedge.
     awaiting_operator = bool(chat.session_open_escalations(conn, sid))
+    try:
+        if not awaiting_operator and agent["handle"]:
+            awaiting_operator = bool(chat.pending_relays_for(conn, agent["handle"]))
+    except Exception:
+        pass
 
     # Trying to stop with an empty inbox == "my slice is done" — unless we're the
     # lead still owing the operator a reply.
@@ -180,6 +187,9 @@ def main():
         # Ceiling: parked too long (e.g. a mis-set team size) -> give up waiting.
         if chat.iso_age_seconds(chat.get_meta(conn, park_key)) >= chat.max_park_seconds():
             chat.del_meta(conn, park_key)
+            # Mark done before leaving: an awaiting lead/captain forced off the barrier at
+            # the ceiling must stop gating teammates (else it pins the rest of its squad).
+            chat.set_status(conn, sid, chat.DONE_STATUS)
             try:
                 chat.send(conn, agent["handle"],
                           f"(left the barrier — waited {chat.max_park_seconds() // 60}m "
