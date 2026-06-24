@@ -25,10 +25,14 @@ Your handle is in your SessionStart briefing. Use it to post.
 - **Declare team size early** if you know it: `chat.py expect N` (or launch with
   `AGORA_TEAM_SIZE=N`). Otherwise a 90s startup grace applies.
 - **Shard a big fleet into squads.** A `squad` is a sub-team with its **own barrier**, so
-  it finishes independently (the lead / `@human` funnel stays global). Join with `squad
-  <name>` (or launch with `AGORA_SQUAD=<name>`); spawn one with `bootstrap N --squad
-  <name>`; size it with `expect --squad <name> N`. The default room (no squad) is
-  unchanged.
+  it finishes independently. Join with `squad <name>` (or launch with `AGORA_SQUAD=<name>`);
+  spawn one with `bootstrap N --squad <name>`; size it with `expect --squad <name> N`. The
+  default room (no squad) is unchanged.
+- **Squads form a chair-topped council.** Each squad has a **captain** (claim yours with
+  `lead --claim`; the earliest-joined member leads by default); captains escalate to one
+  **chair** (the sole operator contact). `@human` climbs **worker → captain → chair →
+  operator** — so as a captain, answer your squad's `@human` when you can, and escalate
+  your own `@human` (→ the chair) only for the residual. `council` shows the hierarchy.
 - **Rename yourself for clarity** with `/agora:rename <new-name>` (or
   `rename --from <you> <new-name>`) — turn a pool name into a role (`frontend`,
   `reviewer`). Your session, history, and read cursor carry over.
@@ -94,7 +98,7 @@ Slash commands `/agora:who`, `/agora:chat`, `/agora:inbox`,
 `/agora:tokens`, `/agora:rename`, `/agora:team`, `/agora:task`,
 `/agora:goal`, `/agora:result`, `/agora:summary`, `/agora:harvest`,
 `/agora:direct`, `/agora:dismiss`, `/agora:standdown`, `/agora:focus`,
-`/agora:claims`, `/agora:squad` wrap these.
+`/agora:claims`, `/agora:squad`, `/agora:council` wrap these.
 
 ## Governance — the constitution (if this repo has one)
 If a `CONSTITUTION.md` exists (your SessionStart briefing points at it), it is the

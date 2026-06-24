@@ -192,9 +192,10 @@ def main():
     if awaiting_operator:
         n = len(chat.session_open_escalations(conn, sid))
         reason = (
-            f"Parked: you're awaiting the operator's reply on {n} open @human "
-            "escalation(s). You'll wake when an operator message @mentions you; until "
-            "then the team stays up. You may stop (you'll keep waiting)."
+            f"Parked: you're awaiting an answer on {n} open @human escalation(s) — from "
+            "the operator (if you're the chair) or the chair relaying down (if you're a "
+            "captain). You'll wake when they @mention you; until then your squad stays "
+            "up. You may stop (you'll keep waiting)."
         )
     else:
         sq_label = f" (squad {squad})" if squad else ""

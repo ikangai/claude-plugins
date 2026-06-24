@@ -378,6 +378,22 @@ Read/write split: the read side (`resolve_lead` + guard) and the write side
 threat model (homogeneous-fleet capture → why the lead is *not* a herd vote), and the
 phased design: `docs/plans/2026-06-07-elected-emergent-leadership-design.md`.
 
+- **Chair-topped council (per-squad leads).** At fleet scale the funnel grows a tier:
+  each squad has a **captain** and the captains escalate to one **chair** (the global
+  lead, still the sole operator contact). `@human` climbs **worker → squad captain →
+  chair → operator**. `resolve_lead(conn, squad)` resolves a captain *within*
+  `active_in_squad` (pointer `meta['lead:<squad>']`, else the floor within the squad);
+  `resolve_lead(conn, None)` is the chair, **byte-identical** to the old global
+  `resolve_lead`. The routing (`human_redirect_target`) sends a worker → its captain
+  (stripped, delegated) and a captain → the chair (**keeps** `@human`, so the existing
+  per-session gate **parks the captain** until the chair answers — its squad held up by
+  the already-per-squad barrier). The **only** new gate machinery: a captain's escalation
+  also clears when the **chair** relays down (`@mentions` it), not only the operator —
+  dormant when unsharded (no captains, so the clause never fires). `lead` is squad-scoped
+  (`--chair` for the global chair); `council` shows the chair + captains; `questions`
+  partitions the chair's operator-level escalations from captains' in-flight ones. Design:
+  `docs/plans/2026-06-24-council-hierarchy-design.md`.
+
 ## Commands
 
 ```bash
@@ -440,8 +456,11 @@ python3 .groupchat/chat.py lead                   # show the current lead + how 
 python3 .groupchat/chat.py lead --claim --from ada    # claim the lead for yourself (emergent)
 python3 .groupchat/chat.py lead bohr              # designate / hand off the lead to @bohr
 python3 .groupchat/chat.py lead --release         # step down → the deterministic floor takes over
-python3 .groupchat/chat.py send --from ada "@human <q>"  # worker: funnels to @<lead> automatically
-python3 .groupchat/chat.py questions              # [operator] the lead's open escalations awaiting you
+python3 .groupchat/chat.py lead --claim --from ada     # in a squad: claim YOUR squad's captaincy
+python3 .groupchat/chat.py lead --chair --claim --from ada  # claim the global CHAIR (sole operator contact)
+python3 .groupchat/chat.py council                # show the chair + each squad's captain
+python3 .groupchat/chat.py send --from ada "@human <q>"  # worker→captain→chair→operator (funnels automatically)
+python3 .groupchat/chat.py questions              # [operator] the chair's open escalations awaiting you
 python3 .groupchat/chat.py answer 42 "yes, ship"  # [operator] answer escalation #42 (wakes the lead)
 
 # Governance — a tracked, human-ratified constitution (votes are advisory)
@@ -592,7 +611,8 @@ layer (escalation rename/handoff, barrier capability) by `tests/correctness_test
 the constitution layer by `python3 tests/{constitution,cite_review,parliament}_test.py`
 and the parliamentary framing (sessions/agendas/decisions) by `tests/sessions_test.py`;
 squad sharding (per-squad barriers) by `tests/squad_test.py`; the heterogeneous-model
-quorum (capture-visible advisory tally) by `tests/model_quorum_test.py`.
+quorum (capture-visible advisory tally) by `tests/model_quorum_test.py`; the chair-topped
+council (per-squad leads) by `tests/council_test.py`.
 
 ```bash
 export GROUPCHAT_DIR=/tmp/gc_test          # isolate from the real room
