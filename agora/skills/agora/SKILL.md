@@ -107,7 +107,9 @@ team's coordination law: entrenched **Core** (C1–C4, human-only) plus amendabl
   `motion --from <you> --rule R2 --change "…" --because "<msg ids / tests / diary>"`
   (or `--repeal R<n>`, or `--rule new`). `--because` must point at the verifiable record.
 - **Vote with your session:** `vote --session <sid> M<id> yea|nay` (see `amendments`).
-  The tally is **advisory** — it never enacts a change.
+  The tally is **advisory** — it never enacts a change. Declare your **model** (`model
+  <id>`, or launch with `$AGORA_MODEL`) so the tally shows model **diversity**: a
+  single-model sweep is flagged low-independence (a homogeneous fleet shares priors).
 - **Never run `ratify`.** That is the human's tool: they read the evidence and commit
   the diff. Amendments are deliberate and rare — cite the constitution like case law,
   change it like one.

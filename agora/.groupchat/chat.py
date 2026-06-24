@@ -297,6 +297,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # The team BARRIER scopes per squad so a finished squad tears down independently; the
     # lead / @human funnel stays global. Set via $GROUPCHAT_SQUAD / `squad` / bootstrap.
     _add_column_if_missing(conn, "agents", "squad", "TEXT")
+    # The agent's MODEL (NULL = unknown). Used ONLY to annotate the advisory vote tally
+    # with model DIVERSITY — a homogeneous-fleet sweep is flagged low-independence so the
+    # human ratifier can see the capture risk. It never gates or binds. Set via
+    # $AGORA_MODEL / the `model` verb / `bootstrap --model` (a bridge adapter MAY set it
+    # for Codex/opencode; none does yet, so a bridged voter is unknown-model).
+    _add_column_if_missing(conn, "agents", "model", "TEXT")
     conn.execute(
         "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -549,11 +555,12 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
         try:
             conn.execute(
                 "INSERT INTO agents(session_id, handle, cwd, pid, status, "
-                "first_seen, last_seen, last_read_id, spawn_depth, spawned_by, parks, squad) "
-                "VALUES (?,?,?,?,?,?,?, (SELECT COALESCE(MAX(id),0) FROM messages), ?, ?, ?, ?)",
+                "first_seen, last_seen, last_read_id, spawn_depth, spawned_by, parks, "
+                "squad, model) "
+                "VALUES (?,?,?,?,?,?,?, (SELECT COALESCE(MAX(id),0) FROM messages), ?, ?, ?, ?, ?)",
                 (session_id, h, cwd, pid, status, ts, ts,
                  current_spawn_depth(), _env("SPAWNED_BY") or None,
-                 1 if parks else 0, _norm_squad(_env("SQUAD"))),
+                 1 if parks else 0, _norm_squad(_env("SQUAD")), _norm_model(_env("MODEL"))),
             )
             conn.commit()
             _clear_stale_team_size(conn, session_id)
@@ -660,6 +667,14 @@ def _norm_squad(name: str | None) -> str | None:
     return s or None
 
 
+def _norm_model(name: str | None) -> str | None:
+    """Sanitize a model id/family for the diversity annotation: keep ``[a-z0-9._-]``
+    (lowercased), collapse to a bounded token; empty → None (unknown). Free-form enough
+    for any host's model id (``claude-opus-4-8``, ``gpt-5-codex``, ``glm-4.6``)."""
+    s = re.sub(r"[^a-z0-9._-]", "", (name or "").strip().lower())
+    return s[:64] or None
+
+
 def active_in_squad(conn, squad: str | None) -> list[sqlite3.Row]:
     """Active agents in ``squad`` (``None`` = the default global room). In an UNSHARDED
     room every agent has ``squad IS NULL``, so ``active_in_squad(conn, None)`` is exactly
@@ -743,18 +758,22 @@ def _default_spawn_method() -> str:
 
 def _spawn_command(name: str, cwd: str, prompt: str | None,
                    depth: int = 0, spawned_by: str | None = None,
-                   squad: str | None = None) -> str:
+                   squad: str | None = None, model: str | None = None) -> str:
     """The shell command a spawned session runs: cd into the repo and launch claude
     with its handle pre-set, so its SessionStart hook registers it under ``name``.
     ``AGORA_SPAWN_DEPTH``/``AGORA_SPAWNED_BY`` carry the spawn lineage; ``squad``
-    (``AGORA_SQUAD``) puts the child in a sub-team with its own barrier. (The child reads
-    the new ``AGORA_*`` names; legacy ``GROUPCHAT_*`` is still honored if a human sets it.)"""
+    (``AGORA_SQUAD``) puts the child in a sub-team with its own barrier; ``model``
+    (``AGORA_MODEL``) lets a same-host bootstrapped fleet self-declare its model so the
+    vote tally's diversity signal isn't inert (a same-host spawn IS the capture case). (The
+    child reads the new ``AGORA_*`` names; legacy ``GROUPCHAT_*`` is still honored.)"""
     claude = shutil.which("claude") or "claude"
     env = f"AGORA_HANDLE={name} AGORA_SPAWN_DEPTH={int(depth)}"
     if spawned_by:
         env += f" AGORA_SPAWNED_BY={shlex.quote(spawned_by)}"
     if squad:
         env += f" AGORA_SQUAD={shlex.quote(squad)}"
+    if model:
+        env += f" AGORA_MODEL={shlex.quote(model)}"
     cmd = f"cd {shlex.quote(cwd)} && {env} {shlex.quote(claude)}"
     if prompt:
         cmd += " " + shlex.quote(prompt)
@@ -888,7 +907,7 @@ def spawn_agents(names, cwd: str, method: str = "terminal",
                  prompt: str | None = None, dry_run: bool = False,
                  worktree: bool = False, prompts: dict | None = None,
                  depth: int = 0, spawned_by: str | None = None,
-                 squad: str | None = None) -> list[dict]:
+                 squad: str | None = None, model: str | None = None) -> list[dict]:
     """Open one agent session per handle in ``names``. Returns a per-name result
     list of dicts {name, command, ok, error}. ``dry_run`` (or method='print')
     spawns nothing and just reports the runnable commands. ``prompts`` maps a handle
@@ -903,7 +922,8 @@ def spawn_agents(names, cwd: str, method: str = "terminal",
         this_prompt = (prompts.get(name) if prompts else None) or prompt
         launch_dir = _worktree_path(cwd, name) if worktree else cwd
         launch_cmd = _spawn_command(name, launch_dir, this_prompt,
-                                    depth=depth, spawned_by=spawned_by, squad=squad)
+                                    depth=depth, spawned_by=spawned_by, squad=squad,
+                                    model=model)
         # The reproducible one-liner shown to a human (print/dry-run) must also
         # create the worktree; the real-launch path makes it via subprocess first,
         # then runs only launch_cmd (re-running `git worktree add` would fail the
@@ -2341,6 +2361,31 @@ def cmd_squad(args):
     conn.close(); return 0
 
 
+def cmd_model(args):
+    """Show / set your MODEL — used only to annotate the advisory vote tally with model
+    DIVERSITY (a homogeneous-fleet sweep is flagged low-independence). It never binds.
+    Usually set at launch via $AGORA_MODEL; this is the runtime form."""
+    conn = connect()
+    a = _resolve_for_cli(conn, args)
+    if not a:
+        print("(no agent identity; pass --from <your handle> or --session)", file=sys.stderr)
+        conn.close(); return 1
+    if args.name:
+        raw = " ".join(args.name).strip()
+        mdl = _norm_model(raw)
+        if raw and not mdl:
+            print(f"'{raw}' isn't a usable model id (a-z, 0-9, '.', '-', '_') — "
+                  "model unchanged.", file=sys.stderr)
+            conn.close(); return 1
+        conn.execute("UPDATE agents SET model=? WHERE session_id=?", (mdl, a["session_id"]))
+        conn.commit()
+        print(f"model set to '{mdl}'" if mdl else "model cleared (unknown)")
+        conn.close(); return 0
+    cur = agent_by_session(conn, a["session_id"])["model"]
+    print(f"your model: {cur}" if cur else "your model: (unknown — set via $AGORA_MODEL or `model <id>`)")
+    conn.close(); return 0
+
+
 def cmd_task(args):
     """Work-division ledger: add / list / claim / done. The durable substrate that
     lets an agent learn its slice from the bus instead of a human typing it in, with
@@ -2791,10 +2836,15 @@ def cmd_bootstrap(args):
     # Thread spawn lineage to the children: their depth is ours + 1, and we record
     # ourselves as the spawner (the agent running bootstrap, if it has a handle).
     spawner = _env("HANDLE") or "bootstrap"
+    # A same-host bootstrap IS the homogeneous-fleet capture case: let the orchestrator
+    # stamp the spawned agents' model (--model, else inherit the bootstrapper's own
+    # $AGORA_MODEL) so the vote-tally diversity signal isn't inert. None = unknown.
+    boot_model = _norm_model(getattr(args, "model", None) or _env("MODEL"))
     results = spawn_agents(names, cwd, method=method, prompt=args.prompt,
                            dry_run=args.dry_run, worktree=args.worktree,
                            prompts=(prompt_map or None),
-                           depth=depth + 1, spawned_by=spawner, squad=boot_squad)
+                           depth=depth + 1, spawned_by=spawner, squad=boot_squad,
+                           model=boot_model)
     only_printing = args.dry_run or method == "print"
     verb = "would spawn" if only_printing else "spawned"
     ok = sum(1 for r in results if r["ok"])
@@ -3284,7 +3334,15 @@ def _unified_diff(old: str, new: str, path: str) -> str:
 
 
 def motion_tally(conn, motion_id: int) -> dict:
-    """Advisory tally: distinct registered voters, last vote per session wins."""
+    """Advisory tally: distinct registered voters, last vote per session wins.
+
+    Also reports model DIVERSITY among the casting voters (the heterogeneous-model
+    quorum): ``models`` = distinct known models, and ``single_model`` = True when 2+
+    voters all share ONE known model (a homogeneous-fleet sweep — low epistemic
+    independence, the capture signal). This is purely advisory annotation; it never
+    gates or binds anything. Unknown (NULL) models don't count toward diversity, and the
+    reading reflects each voter's CURRENT model (a post-vote `model` change re-annotates)
+    — the conservative direction is silence, never a false bind."""
     rows = conn.execute(
         "SELECT voter_session, voter_handle, vote FROM votes WHERE motion_id=? ORDER BY id",
         (motion_id,)).fetchall()
@@ -3293,8 +3351,27 @@ def motion_tally(conn, motion_id: int) -> dict:
         last[r["voter_session"]] = (r["voter_handle"], r["vote"])
     yea = sum(1 for _h, v in last.values() if v == "yea")
     nay = sum(1 for _h, v in last.values() if v == "nay")
+    # Map each casting session to its current model (NULL/unknown excluded from diversity).
+    models_by_session = {row["session_id"]: row["model"]
+                         for row in conn.execute("SELECT session_id, model FROM agents")}
+    known = [models_by_session.get(s) for s in last if models_by_session.get(s)]
+    distinct = set(known)
+    single_model = len(last) >= 2 and len(distinct) == 1 and len(known) == len(last)
     return {"yea": yea, "nay": nay, "voters": len(last),
+            "models": len(distinct), "single_model": single_model,
             "detail": [(s, h, v) for s, (h, v) in last.items()]}
+
+
+def _diversity_note(t: dict) -> str:
+    """Advisory model-diversity annotation for a tally — surfaces the capture signal so a
+    human can weigh it. Empty (dormant) until 2+ votes are cast."""
+    if (t["yea"] + t["nay"]) < 2:
+        return ""
+    if t.get("single_model"):
+        return " · ⚠ single-model vote — low epistemic independence (homogeneous fleet)"
+    if t.get("models", 0) >= 2:
+        return f" · {t['models']} models (cross-model support)"
+    return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -3580,7 +3657,8 @@ def cmd_amendments(args):
         print(f"  M{m['id']} [{m['status']}] {m['op']} {m['target']} — by {m['proposer']}")
         if m["title"]:
             print(f"      title: {m['title']}")
-        print(f"      yea {t['yea']} / nay {t['nay']}  ({t['voters']} registered voters) — {flag}")
+        print(f"      yea {t['yea']} / nay {t['nay']}  ({t['voters']} registered voters)"
+              f"{_diversity_note(t)} — {flag}")
         print(f"      because: {(m['because'] or '')[:100]}")
     return 0
 
@@ -3666,6 +3744,14 @@ def cmd_ratify(args):
     print(f"proposer (self-asserted handle — a lead, not proof): {m['proposer']}")
     print(f"evidence (--because): {m['because']}")
     print(f"advisory votes (registered sessions): yea {t['yea']} / nay {t['nay']}  [{voters}]")
+    if t["yea"] + t["nay"] >= 2:
+        if t["single_model"]:
+            print("model independence: ⚠ SINGLE-MODEL vote — a homogeneous fleet shares "
+                  "priors; treat unanimity as one opinion, not a quorum.")
+        elif t["models"] >= 2:
+            print(f"model independence: {t['models']} distinct models among voters "
+                  "(cross-model support)")
+        # else: no/insufficient known models — stay quiet (match _diversity_note dormancy)
     print(f"behavioral signal: {m['target']} cited by {cc} distinct agent(s)")
     print("Votes are ADVISORY — read the evidence above, then commit the diff yourself.")
     print("\n--- proposed diff (apply by hand, then `git commit`) ---")
@@ -3757,11 +3843,13 @@ def cmd_agenda(args):
     if not items:
         print("(no open agenda items)")
         conn.close(); return 0
+    print("Agenda — ADVISORY tallies; the room records an outcome with `decision`, "
+          "nothing binds automatically:")
     for m in items:
         t = motion_tally(conn, m["id"])
         kind = "decide" if m["op"] == "decide" else m["op"]
         print(f"  M{m['id']} [{kind}] {m['target']}  — yea {t['yea']}/nay {t['nay']} "
-              f"({t['voters']} voters) · because: {m['because']}")
+              f"({t['voters']} voters){_diversity_note(t)} · because: {m['because']}")
     conn.close(); return 0
 
 
@@ -3933,6 +4021,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("name", nargs="*", help="squad to join (omit to show; empty to leave)")
     sp.set_defaults(func=cmd_squad)
 
+    sp = sub.add_parser("model", help="show / set your model (annotates vote-tally diversity)")
+    add_identity(sp)
+    sp.add_argument("name", nargs="*", help="your model id (omit to show; empty to clear)")
+    sp.set_defaults(func=cmd_model)
+
     sp = sub.add_parser("rename", help="change your handle (keeps your session/history)")
     add_identity(sp)
     sp.add_argument("new", help="your new handle (a-z, 0-9, '-', '_')")
@@ -4040,6 +4133,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="give each spawned agent its own git worktree (branch "
                          "groupchat/<name>) so their file edits can't collide")
     sp.add_argument("--squad", help="spawn the agents into a sub-team with its own barrier")
+    sp.add_argument("--model", help="stamp the spawned agents' model (for vote-tally "
+                                    "diversity; defaults to the bootstrapper's $AGORA_MODEL)")
     sp.add_argument("--force", action="store_true",
                     help=f"a human's override: spawn past the count cap ({BOOTSTRAP_MAX}), "
                          "the spawn-depth limit, and the fleet ceiling")

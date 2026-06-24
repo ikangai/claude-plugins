@@ -216,7 +216,7 @@ EXPECTED = {
     "agents": {"session_id", "handle", "cwd", "pid", "status", "first_seen",
                "last_seen", "last_read_id", "in_tokens", "out_tokens",
                "cache_read_tokens", "cache_create_tokens", "spawn_depth", "spawned_by",
-               "focus", "parks", "squad"},
+               "focus", "parks", "squad", "model"},
     "meta": {"key", "value"},
     "rule_cites": {"id", "ts", "rule_id", "sender", "message_id"},
     "motions": {"id", "ts", "proposer", "target", "op", "change", "because",
