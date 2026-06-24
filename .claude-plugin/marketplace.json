@@ -3,9 +3,9 @@
   "owner": { "name": "ikangai" },
   "plugins": [
     {
-      "name": "groupchat",
-      "source": "./groupchat",
-      "description": "Shared chat bus for parallel AI coding-agent sessions on one repo — coordinate via hooks, @mentions, a team barrier, a hub-and-spoke lead, cross-CLI bridges, and token tracking."
+      "name": "agora",
+      "source": "./agora",
+      "description": "A self-organizing polity of parallel AI coding-agent sessions on one repo — coordinate via hooks, @mentions, a (per-squad) team barrier, a task ledger, fan-in, a hub-and-spoke lead, an advisory constitution + parliament, cross-CLI bridges, and token tracking. (Formerly groupchat.)"
     }
   ]
 }
