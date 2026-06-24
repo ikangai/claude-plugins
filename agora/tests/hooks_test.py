@@ -130,7 +130,7 @@ def test_user_prompt_submit(c):
         obj = parse_hook_json(r.stdout)
         ctx = (obj or {}).get("hookSpecificOutput", {}).get("additionalContext", "")
         c.check("injects the new message", "starting on auth.py" in ctx, ctx[:200])
-        c.check("labels it as new group-chat", "New group-chat" in ctx, ctx[:200])
+        c.check("labels it as new agora messages", "New agora" in ctx, ctx[:200])
 
         # Cursor advanced -> a second submit with nothing new is silent.
         r2 = hook("user_prompt_submit.py", env,

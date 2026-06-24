@@ -274,6 +274,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             glob       TEXT    NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_claims_session ON claims(session_id);
+        CREATE TABLE IF NOT EXISTS dismissed (
+            session_id TEXT PRIMARY KEY,
+            ts         TEXT
+        );
         """
     )
     # Token-usage columns (added post-v1; guarded so old dbs upgrade in place).
@@ -283,6 +287,11 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "motions", "title", "TEXT")
     # Which parliamentary session a motion/decision-item belongs to (governance framing).
     _add_column_if_missing(conn, "motions", "session_id", "TEXT")
+    # The authoring session of a message (the escalation gate keys on it). Part of the
+    # CREATE TABLE, but a pre-session_id legacy room (.groupchat) needs the guarded ALTER
+    # too — without it every send() raises "no such column: session_id" (the messages
+    # table's only post-v1 column; old dbs are exactly the ones _room_dirname prefers).
+    _add_column_if_missing(conn, "messages", "session_id", "TEXT")
     # Spawn lineage (Phase 3): how deep this agent was spawned and by whom — the
     # autonomous-spawn audit trail. Guarded so old dbs upgrade in place.
     _add_column_if_missing(conn, "agents", "spawn_depth", "INTEGER NOT NULL DEFAULT 0")
@@ -568,6 +577,7 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
             )
             conn.commit()
             _clear_stale_team_size(conn, session_id)
+            _clear_stale_standdown(conn, session_id)
             return h
         except sqlite3.IntegrityError:
             handle = None  # collided; let the pool pick the next free one
@@ -1191,50 +1201,62 @@ def standdown_active(conn) -> bool:
     return bool(ts) and iso_age_seconds(ts) < ACTIVE_WINDOW_SECONDS
 
 
+def _clear_stale_standdown(conn, session_id: str) -> None:
+    """Drop a standdown left by a DEPARTED cohort so a fresh cohort assembling in a reused
+    room WITHIN the 15-min active window isn't released from its barrier on arrival (the
+    auto-expiry only covers a flag older than the window). Fires only when the
+    just-registered agent is the SOLE active agent — i.e. the declaring cohort is gone; a
+    still-active cohort (a teammate present) keeps its standdown. Mirrors
+    ``_clear_stale_team_size``."""
+    if get_meta(conn, "standdown") is None:
+        return
+    if any(a["session_id"] != session_id for a in active_agents(conn)):
+        return  # a teammate anchors the cohort — the standdown is live
+    del_meta(conn, "standdown")
+    del_meta(conn, "standdown_reason")
+
+
 def _dismissed_set(conn) -> set:
-    """The dismissed-session set, parsed FAIL-SAFE: a corrupt or non-list ``dismissed``
-    meta reads as empty rather than raising. This is load-bearing — ``is_dismissed``
-    runs inside the Stop hook, and an exception there would escape the barrier branch
-    and let an agent stop while teammates are unfinished (a premature teardown). Mirrors
-    the defensive parse in ``iso_age_seconds`` / ``sum_transcript_tokens``."""
-    try:
-        v = json.loads(get_meta(conn, "dismissed") or "[]")
-        return set(v) if isinstance(v, list) else set()
-    except Exception:
-        return set()
+    """The dismissed-session set. A dedicated ROW-PER-SESSION table (not a JSON blob), so
+    add/remove are atomic single statements — no read-modify-write lost-update under
+    concurrent dismiss/dismiss or dismiss/clear. Reads are inherently fail-safe (no JSON to
+    corrupt), which matters because ``is_dismissed`` runs inside the Stop hook."""
+    return {r["session_id"] for r in conn.execute("SELECT session_id FROM dismissed")}
 
 
 def dismiss_agent(conn, handle: str) -> str | None:
     """Release ONE active agent from the barrier (lead/operator action). Returns its
-    session id, or None if no such active agent. Marks it ``done`` (so it no longer
-    holds OTHER agents at the barrier) and adds its session id to the ``dismissed`` set
-    — keyed by session id, so it's immune to handle reuse, and pruned to live sessions
-    so the set stays bounded. Its own park loop sees the dismissal and exits."""
+    session id, or None if no such active agent. Marks it ``done`` (so it no longer holds
+    OTHER agents) and records its session in the ``dismissed`` table — keyed by session id
+    (immune to handle reuse). The insert is atomic (``INSERT OR IGNORE``), so concurrent
+    dismissals can't clobber each other. Its own park loop sees the dismissal and exits."""
     a = agent_by_handle(conn, (handle or "").strip().lower())
     if not a or not _is_active(a["last_seen"]):
         return None
     sid = a["session_id"]
     set_status(conn, sid, DONE_STATUS)
+    conn.execute("INSERT OR IGNORE INTO dismissed(session_id, ts) VALUES(?, ?)",
+                 (sid, now_iso()))
+    # Opportunistically prune rows for departed sessions so the table stays bounded.
     live = {x["session_id"] for x in active_agents(conn)}
-    current = {s for s in _dismissed_set(conn) if s in live}
-    current.add(sid)
-    set_meta(conn, "dismissed", json.dumps(sorted(current)))
+    for s in list(_dismissed_set(conn)):
+        if s not in live and s != sid:
+            conn.execute("DELETE FROM dismissed WHERE session_id=?", (s,))
+    conn.commit()
     return sid
 
 
 def is_dismissed(conn, session_id: str) -> bool:
-    return session_id in _dismissed_set(conn)
+    return conn.execute("SELECT 1 FROM dismissed WHERE session_id=?",
+                        (session_id,)).fetchone() is not None
 
 
 def clear_dismissed(conn, session_id: str) -> None:
-    """Consume a ONE-SHOT dismissal: drop ``session_id`` from the dismissed set. Called
-    when a dismissed session is released (it's leaving) or REVIVES to answer a teammate
-    — so a revived agent rejoins the barrier instead of being stuck 'released' for the
-    rest of its life."""
-    cur = _dismissed_set(conn)
-    if session_id in cur:
-        cur.discard(session_id)
-        set_meta(conn, "dismissed", json.dumps(sorted(cur)))
+    """Consume a ONE-SHOT dismissal: drop ``session_id`` (atomic DELETE). Called when a
+    dismissed session is released (leaving) or REVIVES to answer a teammate — so a revived
+    agent rejoins the barrier instead of being stuck 'released' for the rest of its life."""
+    conn.execute("DELETE FROM dismissed WHERE session_id=?", (session_id,))
+    conn.commit()
 
 
 def released_from_barrier(conn, session_id: str) -> bool:
@@ -1633,7 +1655,13 @@ def resolve_lead(conn, squad: str | None = None) -> str | None:
         env = (_env("LEAD") or "").strip().lower()
         if env and env in active_handles:
             return env
-    return min(acts, key=lambda a: (a["first_seen"] or "", a["handle"]))["handle"]
+    # Floor: prefer a HOOK-CAPABLE (parks=1) agent — a non-hook host (opencode/generic,
+    # parks=0) can't be reliably woken/parked, so it shouldn't silently become the
+    # single point of human contact. Fall back to a non-hook agent only if it's the only
+    # kind active (an explicit pointer/env above can still designate one deliberately).
+    hook_acts = [a for a in acts if a["parks"]]
+    floor_pool = hook_acts or acts
+    return min(floor_pool, key=lambda a: (a["first_seen"] or "", a["handle"]))["handle"]
 
 
 def _code_span_ranges(body: str) -> list[tuple[int, int]]:
@@ -1665,6 +1693,17 @@ def _has_unquoted_human(body: str) -> bool:
     spans = _code_span_ranges(body)
     return any(m.group(1).lower() == HUMAN_TOKEN and not _in_spans(m.start(), spans)
                for m in MENTION_RE.finditer(body))
+
+
+_RE_REF = re.compile(r"\[re #(\d+)\]")
+
+
+def _re_refs(body: str) -> set:
+    """Message ids a reply explicitly answers, parsed from the ``[re #N]`` marker that
+    ``answer`` stamps. The captain relay-clear keys on this (a SPECIFIC answered
+    escalation) rather than a bare @mention, so ordinary chair→captain chatter
+    ('@cap please rebase') can't spuriously clear an open escalation."""
+    return {int(m.group(1)) for m in _RE_REF.finditer(body or "")}
 
 
 def _squad_of_handle(conn, handle: str) -> str | None:
@@ -1735,7 +1774,12 @@ def _mentions(row) -> list:
 
 
 def open_escalations(conn, lead: str) -> list[int]:
-    """Message-ids of the lead's @human escalations the operator still owes a reply
+    """The handle-keyed predecessor of ``session_open_escalations`` — SUPERSEDED in
+    production (the Stop hook gates by session, immune to rename/handoff) and retained
+    only for its dedicated tests (barrier_escalation_e2e / phase2_lead_escalation), which
+    pin the handle-keyed semantics. No production caller; do not add one.
+
+    Message-ids of the lead's @human escalations the operator still owes a reply
     on — the read side of the P2 lead-done gate. Walking chat chronologically: each
     *unquoted* ``@human`` message *by the lead* opens an escalation; an operator
     message (``sender == HUMAN_TOKEN``) that @mentions the lead afterwards clears the
@@ -1811,8 +1855,9 @@ def session_open_escalations(conn, session_id: str) -> list[int]:
             open_ids = []                         # the operator answered
         elif (asker_has_squad and handle in ments and sndr != handle
               and not _has_unquoted_human(r["body"])
-              and (sndr in addressees or (chair and sndr == chair))):
-            open_ids = []                         # the chair relayed an answer down
+              and (sndr in addressees or (chair and sndr == chair))
+              and _re_refs(r["body"]) & set(open_ids)):
+            open_ids = []                         # the chair RELAYED an answer down (marked)
     return open_ids
 
 
@@ -1847,17 +1892,42 @@ def all_open_escalations(conn) -> dict:
                 if sid in queues:
                     queues[sid] = []              # the operator answered
         elif not _has_unquoted_human(r["body"]):
-            # A captain's queue clears when the chair relays down — time-invariant: the
+            # A captain's queue clears when the chair RELAYS down — time-invariant (the
             # relayer is a FROZEN addressee of that captain's escalation OR the current
-            # chair. Only for squad-having (captain) askers, so flat rooms are unaffected.
+            # chair) AND it must carry the explicit [re #id] relay marker, so ordinary
+            # chair→captain chatter can't spuriously clear it. Captain (squad) askers only.
+            refs = _re_refs(r["body"])
             for m in ments:
                 sid = handle_sess.get(m)
                 if (sid in queues and sess_squad.get(sid) and sndr != m
-                        and (sndr in addressees.get(sid, set()) or (chair and sndr == chair))):
+                        and (sndr in addressees.get(sid, set()) or (chair and sndr == chair))
+                        and refs & set(queues[sid])):
                     queues[sid] = []
     # Only surface queues whose author still has an agent row — a departed/recycled
     # session's question is moot (the asker is gone) and would be unanswerable.
     return {s: ids for s, ids in queues.items() if ids and s in sess_handle}
+
+
+def pending_relays_for(conn, handle: str) -> list:
+    """Open CAPTAIN escalation ids addressed to ``handle`` (a chair) still awaiting its
+    relay down. The Stop hook gates the chair on this so it parks until it relays — not
+    just while the captain's @mention is still UNREAD (a read-but-unrelayed escalation
+    would otherwise let the chair tear down owing a captain an answer). One pass over the
+    open escalations; empty (dormant) in a flat / captain-less room."""
+    h = (handle or "").strip().lower()
+    if not h:
+        return []
+    sess_squad = {r["session_id"]: r["squad"]
+                  for r in conn.execute("SELECT session_id, squad FROM agents").fetchall()}
+    out: list = []
+    for sid, ids in all_open_escalations(conn).items():
+        if not sess_squad.get(sid):          # captains only (squad members with kept @human)
+            continue
+        for mid in ids:
+            r = conn.execute("SELECT mentions FROM messages WHERE id=?", (mid,)).fetchone()
+            if r and h in [m.lower() for m in _mentions(r)]:
+                out.append(mid)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1898,16 +1968,23 @@ def clear_lead(conn, squad: str | None = None) -> None:
 # Messaging
 # --------------------------------------------------------------------------- #
 def _expand_broadcast(conn, sender: str, mentions: list[str]) -> list[str]:
-    """Expand a ``@team`` / ``@all`` broadcast token into every active teammate (minus
-    the sender), so a broadcast actually @mentions — and thus blocks the Stop of —
-    everyone. The literal token is dropped (it's reserved, never a real handle). A
-    message without a broadcast token is returned unchanged."""
-    if not (BROADCAST_TOKENS & set(mentions)):
+    """Expand a ``@team`` / ``@all`` broadcast token into active teammates (minus the
+    sender), so a broadcast actually @mentions — and thus blocks the Stop of — them. The
+    literal token is dropped (reserved). A message without a broadcast token is unchanged.
+
+    Squad-aware: ``@team`` is the sender's OWN SQUAD (a captain's rally doesn't wake other
+    squads — squad isolation); ``@all`` is the whole fleet. For an unsquadded sender both
+    are the whole fleet (byte-identical to before in a flat room)."""
+    toks = BROADCAST_TOKENS & set(mentions)
+    if not toks:
         return mentions
-    # Exclude the sender and any reserved name (so a legacy agent literally named
-    # 'team'/'all' in an old db can't self-ping or mutually re-expand).
-    others = ({a["handle"] for a in active_agents(conn)}
-              - {(sender or "").strip().lower()} - set(RESERVED_HANDLES))
+    s = (sender or "").strip().lower()
+    sq = _squad_of_handle(conn, s)
+    if "all" in toks or not sq:
+        pool = active_agents(conn)              # fleet-wide (@all, or an unsquadded sender)
+    else:
+        pool = active_in_squad(conn, sq)        # @team → the sender's squad only
+    others = {a["handle"] for a in pool} - {s} - set(RESERVED_HANDLES)
     real = [m for m in mentions if m not in BROADCAST_TOKENS]
     return sorted(set(real) | others)
 
@@ -1976,7 +2053,7 @@ def unread_for(conn, agent_row, include_own: bool = False) -> list[sqlite3.Row]:
 
 
 def format_message(m: sqlite3.Row, highlight: str | None = None) -> str:
-    mentions = json.loads(m["mentions"] or "[]")
+    mentions = _mentions(m)  # fail-safe parse — one corrupt row renders without crashing
     arrow = ""
     if mentions:
         arrow = " → " + " ".join("@" + x for x in mentions)
@@ -2099,11 +2176,12 @@ def cmd_questions(args):
 
 
 def cmd_answer(args):
-    """Operator convenience: answer a lead's @human escalation. Posts an @<lead>
-    reply *as the operator* (sender 'human'), which clears the lead's escalation
-    queue and wakes it via the existing @mention path. Sugar over
-    ``send --from human "@<lead> ..."`` — but it targets the escalation's author and
-    refuses non-escalations, keeping the hub-and-spoke discipline intact."""
+    """Answer / relay an @human escalation. The OPERATOR (bare invocation or
+    ``--from human``) posts as 'human' to answer the chair. A relaying CHAIR/lead
+    (``--from <handle>``) posts as itself to relay an answer DOWN to a captain — both
+    stamp the ``[re #id]`` marker that clears the asker's escalation (a bare @mention
+    no longer clears a captain, so ordinary chatter can't). Targets the escalation's
+    author and refuses non-escalations, keeping the hub-and-spoke discipline intact."""
     conn = connect()
     mid = args.msg_id
     row = conn.execute(
@@ -2125,9 +2203,12 @@ def cmd_answer(args):
     author = agent_by_session(conn, row["session_id"]) if row["session_id"] else None
     if author:
         target = author["handle"]
-    # A captain's escalation is normally relayed by the chair (the funnel) — answering it
-    # directly works but bypasses the chair. Inform, don't block (operator agency).
-    if author and author["squad"] and (target or "").lower() != resolve_lead(conn, None):
+    # The OPERATOR posts as 'human'; a relaying chair/lead (--from <handle>) posts as itself.
+    caller = _resolve_for_cli(conn, args)
+    # When the OPERATOR answers a captain directly (no --from), it bypasses the chair funnel
+    # — inform, don't block. A chair/lead relaying (--from) IS the funnel, so no note.
+    if (not caller and author and author["squad"]
+            and (target or "").lower() != resolve_lead(conn, None)):
         print(f"note: @{target} is a captain — its escalation usually reaches you via the "
               f"chair @{resolve_lead(conn, None)}. Answering directly bypasses the funnel.",
               file=sys.stderr)
@@ -2137,8 +2218,12 @@ def cmd_answer(args):
         print("nothing to answer (empty message)", file=sys.stderr)
         conn.close()
         return 1
-    new_id = send(conn, HUMAN_TOKEN, f"@{target} [re #{mid}] {text}", kind="chat")
-    print(f"answered #{mid} → @{target} (sent #{new_id})")
+    # The OPERATOR posts as 'human'; a relaying chair/lead (--from <handle>) posts as
+    # itself, so a captain's escalation clears via the chair-relay path (marker-gated).
+    speaker = caller["handle"] if caller else HUMAN_TOKEN
+    new_id = send(conn, speaker, f"@{target} [re #{mid}] {text}",
+                  session_id=(caller["session_id"] if caller else None), kind="chat")
+    print(f"{'relayed' if caller else 'answered'} #{mid} → @{target} as {speaker} (sent #{new_id})")
     conn.close()
     return 0
 
@@ -2169,13 +2254,15 @@ def cmd_inbox(args):
         conn.close()
         return 1
     msgs = [m for m in unread_for(conn, a)
-            if a["handle"].lower() in [x.lower() for x in json.loads(m["mentions"] or "[]")]]
+            if a["handle"].lower() in [x.lower() for x in _mentions(m)]]
     if not msgs:
         print("(no unread mentions)")
     else:
         print(format_messages(msgs, highlight=a["handle"]))
-        if not args.peek:
-            mark_read(conn, a["session_id"], msgs[-1]["id"])
+    # `inbox` is a FILTERED view and is ALWAYS peek-only: the single monotonic cursor
+    # can't represent "read this @mention but not an earlier non-mention broadcast", so
+    # advancing to the last mention's id would silently skip lower-id chatter. Full
+    # delivery (which advances) is `read` / the hooks. (--peek kept as a no-op alias.)
     conn.close()
     return 0
 
@@ -2781,7 +2868,9 @@ def _control_caller_ok(conn, args):
     invocation (no identity = the operator at the terminal) pass; a known worker (a
     resolved/named non-lead agent) is rejected. ``--from`` is unauthenticated like
     everywhere else — this is a guardrail against a worker *agent* disbanding the
-    fleet, not a security boundary."""
+    fleet, not a security boundary. In particular ``--from human`` is forgeable BY
+    DESIGN (a bare invocation already IS the operator), so the gate stops an *honest*
+    worker, not a determined one — consistent with the soft-guard model throughout."""
     a = _resolve_for_cli(conn, args)
     caller = (a["handle"] if a
               else (getattr(args, "from_handle", None) or "").strip().lower() or None)
@@ -3038,9 +3127,12 @@ def cmd_bootstrap(args):
         if getattr(args, "goal", None):
             print(f"Shared goal: {args.goal} "
                   "(every agent sees it in their briefing and `who`).")
+        # $AGORA_TEAM_SIZE only overrides the DEFAULT-room size (expected_team_size reads
+        # the env for squad=None) — a per-squad size lives in its own meta key, so don't
+        # print the misleading override note for a --squad bootstrap.
         env_sz = (_env("TEAM_SIZE") or "").strip()
-        if env_sz:
-            print(f"  note: $GROUPCHAT_TEAM_SIZE={env_sz} in your environment "
+        if env_sz and not boot_squad:
+            print(f"  note: $AGORA_TEAM_SIZE={env_sz} in your environment "
                   f"overrides this — the barrier will use {env_sz}.")
 
     if only_printing:
@@ -3887,15 +3979,26 @@ def cmd_ratify(args):
         return 1
 
     if getattr(args, "confirm", False):
+        # Ratification is the HUMAN's act (C1). Gate the status-changing --confirm like the
+        # control plane: the operator (a bare invocation) or the lead may enact; a known
+        # worker agent (or a forged --from) is rejected. The dossier above is read-only and
+        # ungated — anyone can inspect the evidence + diff.
+        ok, caller, lead = _control_caller_ok(conn, args)
+        if not ok:
+            print(f"only the operator (a bare invocation) or the lead (@{lead}) may "
+                  f"`ratify --confirm` — you are @{caller}. (Ratification is a human act; "
+                  f"the dossier without --confirm is open to all.)", file=sys.stderr)
+            conn.close()
+            return 1
         # Record the human's decision + notify the room ("re-read the law"); the human
         # then applies + commits the diff (C1, diff-only). The guards above ran first,
         # so a taken id or a changed base text is still refused.
         conn.execute("UPDATE motions SET status='ratified' WHERE id=?", (mid,))
         send(conn, "system",
-             f"Constitution: M{mid} ratified ({m['op']} {m['target']}) — re-read the law.",
-             kind="system")
+             f"Constitution: M{mid} ratified ({m['op']} {m['target']}) — pending the "
+             "operator's git commit; re-read the law once it lands.", kind="system")
         conn.commit()
-        print(f"M{mid} marked ratified and the team notified. "
+        print(f"M{mid} marked ratified (pending your git commit) and the team notified. "
               "Apply this diff, then `git commit` it:")
         print(_unified_diff(text, new_text, path))
         return 0
@@ -4162,7 +4265,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_questions)
 
     sp = sub.add_parser("answer",
-                        help="[operator] answer a lead's @human escalation by its message id")
+                        help="answer/relay an @human escalation by its message id "
+                             "([operator] bare; a chair relays with --from <handle>)")
+    add_identity(sp)
     sp.add_argument("msg_id", type=int, help="the escalation's message id (see `questions`)")
     sp.add_argument("message", nargs="+", help="your answer to the team")
     sp.set_defaults(func=cmd_answer)
@@ -4349,6 +4454,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_amendments)
 
     sp = sub.add_parser("ratify", help="[human] show a motion's evidence + proposed diff (read-only); --confirm to enact")
+    add_identity(sp)
     sp.add_argument("motion", help="motion id, e.g. M12")
     sp.add_argument("--confirm", action="store_true",
                     help="mark ratified + notify the team (run BEFORE applying the diff); then apply + git commit")

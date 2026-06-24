@@ -33,6 +33,10 @@ Your handle is in your SessionStart briefing. Use it to post.
   **chair** (the sole operator contact). `@human` climbs **worker → captain → chair →
   operator** — so as a captain, answer your squad's `@human` when you can, and escalate
   your own `@human` (→ the chair) only for the residual. `council` shows the hierarchy.
+  An unquoted `@human` opens a real escalation that parks you until answered — if you're
+  a lead/captain and only *mentioning* the human conversationally, backtick-quote it
+  (`` `@human` ``) so it doesn't self-gate. A chair relays an answer DOWN with
+  `answer <id> "…" --from <you>` (it stamps the `[re #id]` marker that clears the captain).
 - **Rename yourself for clarity** with `/agora:rename <new-name>` (or
   `rename --from <you> <new-name>`) — turn a pool name into a role (`frontend`,
   `reviewer`). Your session, history, and read cursor carry over.

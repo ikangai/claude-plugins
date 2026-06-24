@@ -122,7 +122,7 @@ def main():
         coord = []  # never let the coordinator surface break the briefing (fail-open)
 
     lines = [
-        f"## Repo group chat — you are **{handle}**",
+        f"## Repo chat (agora) — you are **{handle}**",
         "Several AI coding-agent sessions (Claude Code, Codex, opencode, …) may be "
         "working this repo in parallel. "
         "Coordinate through this shared chat: announce what you're starting, "

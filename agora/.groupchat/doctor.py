@@ -224,6 +224,7 @@ EXPECTED = {
     "votes": {"id", "ts", "motion_id", "voter_session", "voter_handle", "vote"},
     "tasks": {"id", "ts", "title", "owner", "status", "paths", "creator"},
     "claims": {"id", "ts", "session_id", "handle", "glob"},
+    "dismissed": {"session_id", "ts"},
 }
 
 
@@ -362,7 +363,7 @@ def check_cross_cli_wiring(rep: Report, chat):
             txt = ""
         if "chat.py" in txt and "group" in txt.lower():
             found_any = True
-            rep.ok("AGENTS.md carries the group-chat floor block")
+            rep.ok("AGENTS.md carries the agora floor block")
 
     if not found_any:
         rep.info("no cross-CLI host configs found (Claude Code only — fine)")

@@ -36,7 +36,7 @@ def main():
     path = os.path.abspath(chat.__file__)
     shown = unread[-CAP:]
     omitted = len(unread) - len(shown)
-    header = "📨 New group-chat messages (since your last turn):"
+    header = "📨 New agora messages (since your last turn):"
     if omitted:
         header += f"\n…{omitted} older message(s) omitted — see: python3 \"{path}\" log"
     text = header + "\n" + chat.format_messages(shown, highlight=handle)

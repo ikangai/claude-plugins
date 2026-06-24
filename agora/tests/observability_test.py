@@ -313,11 +313,26 @@ def test_old_db_upgrades_in_place(c):
         try:
             conn = chat.connect()  # runs _ensure_schema -> migrates in place
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}
+            mcols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
             tbls = {r["name"] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
-            conn.close()
             c.check("an old db gains the focus column on connect", "focus" in cols, str(cols))
             c.check("an old db gains the claims table on connect", "claims" in tbls, str(tbls))
+            c.check("an old db gains messages.session_id on connect",
+                    "session_id" in mcols, str(mcols))
+            # The whole messages-write path must work on the migrated legacy db (the gap
+            # the old test missed: it never sent a message, so a broken send shipped green).
+            try:
+                chat.send(conn, "ada", "hello", session_id="s1")
+                chat.session_open_escalations(conn, "s1")
+                chat.all_open_escalations(conn)
+                sent_ok = True
+            except Exception as e:
+                sent_ok = False
+                c.check("send/escalation on a migrated legacy db", False, f"{type(e).__name__}: {e}")
+            if sent_ok:
+                c.check("send + escalation reads work on a migrated legacy db", True)
+            conn.close()
         finally:
             os.environ.pop("GROUPCHAT_DIR", None)
 

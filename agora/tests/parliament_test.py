@@ -156,6 +156,23 @@ def test_ratify_dossier_diff_no_write(root):
           "ratif" in log.stdout.lower() or "constitution" in log.stdout.lower(), log.stdout)
 
 
+def test_ratify_confirm_is_caller_gated(root):
+    # --confirm is the human's act: a known worker agent (or forged --from) is rejected;
+    # the operator (a bare invocation) may enact. The read-only dossier stays open to all.
+    env = env_for(root)
+    run(["constitution", "init"], env)
+    run(["register", "--session", "s_lead", "--from", "ada"], env)   # ada = floor lead
+    run(["register", "--session", "s_w", "--from", "worker"], env)   # worker is NOT the lead
+    run(["motion", "--from", "worker", "--rule", "R2", "--change", "v2", "--because", "#1"], env)
+    mid = first_motion_id(root)
+    r = run(["ratify", f"M{mid}", "--confirm", "--from", "worker"], env)
+    check("a worker's ratify --confirm is refused", r.returncode != 0, r.stdout + r.stderr)
+    st = run(["amendments", "--all"], env).stdout
+    check("...and the motion is NOT ratified", "ratified" not in st.lower(), st)
+    r2 = run(["ratify", f"M{mid}", "--confirm"], env)  # operator (bare) may enact
+    check("the operator (bare invocation) may ratify --confirm", r2.returncode == 0, r2.stderr)
+
+
 def test_ratify_toctou(root):
     env = env_for(root)
     run(["constitution", "init"], env)
@@ -174,7 +191,8 @@ def main():
         test_motion_basic, test_motion_core_rejected, test_motion_requires_evidence,
         test_motion_supersede, test_motion_add_allocates_new_id,
         test_vote_requires_registered_session, test_vote_recorded_last_wins,
-        test_amendments_advisory, test_ratify_dossier_diff_no_write, test_ratify_toctou,
+        test_amendments_advisory, test_ratify_dossier_diff_no_write,
+        test_ratify_confirm_is_caller_gated, test_ratify_toctou,
     ]
     for t in tests:
         print(f"\n# {t.__name__}")
