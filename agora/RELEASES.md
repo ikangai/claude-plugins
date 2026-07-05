@@ -1,5 +1,16 @@
 # Release notes
 
+## v0.15.2 — 2026-07-05 — clearer barrier-park status line
+
+The Stop hook's spinner said "⏳ waiting for teammates at the group-chat barrier…",
+which read as if the session had stopped or hung (operator-reported confusion). It now
+says what is actually happening: **"⏳ parked at the agora team barrier — not stopped:
+wakes on a teammate's @mention, exits when the whole team is done"**. Updated in all
+three places the message is defined — the plugin manifest (`hooks/hooks.json`),
+`chat.py install`'s `HOOK_OPTIONS`, and the Codex bridge (`bridge/install.py`, which
+also carried a slightly different wording). The trailing `…` is dropped (the host UI
+appends its own animated ellipsis, which doubled it).
+
 ## v0.15.1 — 2026-06-24 — review hardening
 
 A thorough whole-codebase implementation review (8 lenses, each finding adversarially
