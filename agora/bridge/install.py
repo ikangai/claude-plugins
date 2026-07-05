@@ -45,7 +45,9 @@ HOOK_OPTIONS = {
     "SessionStart": {"matcher": _SESSION_SOURCES, "timeout": 15},
     "UserPromptSubmit": {"timeout": 15},
     "Stop": {"timeout": 600,
-             "statusMessage": "⏳ waiting for teammates at the agora barrier…"},
+             "statusMessage": "⏳ parked at the agora team barrier — not stopped: "
+                              "wakes on a teammate's @mention, exits when the whole "
+                              "team is done"},
 }
 
 

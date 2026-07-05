@@ -3179,7 +3179,9 @@ HOOK_ENTRIES = {
 HOOK_OPTIONS = {
     "UserPromptSubmit": {"timeout": 15},
     "Stop": {"timeout": 600,
-             "statusMessage": "⏳ waiting for teammates at the group-chat barrier…"},
+             "statusMessage": "⏳ parked at the agora team barrier — not stopped: "
+                              "wakes on a teammate's @mention, exits when the whole "
+                              "team is done"},
 }
 
 
