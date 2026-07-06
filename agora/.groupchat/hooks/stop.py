@@ -45,6 +45,19 @@ def _envnum(suffix, default, cast):
         return default
 
 
+def _park_override():
+    """Tri-state ``AGORA_PARK`` (legacy ``GROUPCHAT_PARK``) — an override on the
+    spawned-vs-attended heuristic below. Returns True (always park), False (never
+    park), or None (use the heuristic). Fail-open: an unrecognised value falls back
+    to the heuristic, never raises — a junk env must not kill the Stop hook."""
+    v = (_envv("PARK") or "").strip().lower()
+    if v in ("1", "true", "yes", "on", "always"):
+        return True
+    if v in ("0", "false", "no", "off", "never"):
+        return False
+    return None
+
+
 # Poll for this long, then re-park (< the Stop hook timeout of 600s). Env-tunable
 # (and shrunk in tests). Tick is the barrier / @mention detection latency.
 PARK_WINDOW_SECONDS = _envnum("PARK_WINDOW", 570, int)
@@ -149,6 +162,30 @@ def main():
     # Trying to stop with an empty inbox == "my slice is done" — unless we're the
     # lead still owing the operator a reply.
     chat.set_status(conn, sid, "active" if awaiting_operator else chat.DONE_STATUS)
+
+    # 2.5. Attended terminals never park. Parking is a *blocking* sleep (below); while
+    #      it runs Claude Code waits for this hook to return, so a human sitting here has
+    #      their typed prompt queued and the terminal frozen. That trade (dormant, ~0
+    #      tokens, wakes on a teammate's @mention) only pays for an *unattended* worker.
+    #      For an attended session it's pure downside — and for a solo lead parking to
+    #      wait for the operator's answer to its own @human it's a deadlock: the frozen
+    #      terminal is exactly where that answer would be typed. So only bootstrap-spawned
+    #      workers park. `spawned_by` is written once at register (set by bootstrap for its
+    #      children, NULL for a human-launched session) and never rewritten, so it's a
+    #      stable attended-vs-worker signal. The status set just above still records whether
+    #      this agent gates the barrier, so spawned teammates coordinate correctly; a later
+    #      @mention reaches an attended session on its human's next prompt (user_prompt_submit).
+    #      ``AGORA_PARK`` overrides the heuristic either way. Fail toward not-freezing.
+    try:
+        should_park = bool(agent["spawned_by"])
+    except (IndexError, KeyError):
+        should_park = False  # unknown lineage -> treat as attended (never freeze)
+    ov = _park_override()
+    if ov is not None:
+        should_park = ov
+    if not should_park:
+        chat.del_meta(conn, park_key)
+        return  # allow the stop — never freeze an attended terminal
 
     # 3. Barrier: exit only when the whole team is done AND we owe the operator
     #    nothing. An awaiting lead keeps the team up so no answer is lost.

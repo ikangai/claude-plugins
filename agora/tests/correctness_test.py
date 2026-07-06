@@ -68,6 +68,7 @@ def test_escalation_survives_rename(c):
     with tmp_root() as root:
         env = init_room(root)
         env = dict(env); env["GROUPCHAT_PARK_WINDOW"] = "0"
+        env["GROUPCHAT_SPAWNED_BY"] = "orchestrator"  # spawned worker: the config that parks
         cli(["register", "--session", "s_ada", "--from", "ada"], env)  # sole -> lead
         mid = _send_id(env, "ada", "@human need a decision on the schema")
         cli(["rename", "--from", "ada", "chief"], env)
@@ -94,6 +95,7 @@ def test_escalation_survives_handoff(c):
     with tmp_root() as root:
         env = init_room(root)
         env = dict(env); env["GROUPCHAT_PARK_WINDOW"] = "0"
+        env["GROUPCHAT_SPAWNED_BY"] = "orchestrator"  # spawned worker: the config that parks
         cli(["register", "--session", "s_ada", "--from", "ada"], env)
         cli(["register", "--session", "s_bob", "--from", "bob"], env)
         cli(["lead", "--claim", "--from", "ada"], env)  # ada is the lead
@@ -118,6 +120,7 @@ def test_normal_escalation_still_works(c):
     with tmp_root() as root:
         env = init_room(root)
         env = dict(env); env["GROUPCHAT_PARK_WINDOW"] = "0"
+        env["GROUPCHAT_SPAWNED_BY"] = "orchestrator"  # spawned worker: the config that parks
         cli(["register", "--session", "s_ada", "--from", "ada"], env)
         mid = _send_id(env, "ada", "@human approve the release?")
         c.check("a lead parks on its open escalation",

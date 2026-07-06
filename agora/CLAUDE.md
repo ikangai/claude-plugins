@@ -184,6 +184,17 @@ blocks). So `stop.py` keeps a finished agent alive until the *whole team* is don
   session is dormant while it waits, so it costs ~0 tokens. It wakes on a new
   @mention (reply, then re-park) or on the barrier (exit together). An idle agent
   costs ~1 trivial turn per ~10 min (the re-park).
+- **Only *unattended* (bootstrap-spawned) agents park.** The park is a *blocking*
+  sleep — while it runs the host waits for the hook to return, so a human sitting at
+  that terminal has their next prompt queued and the session frozen. That trade only
+  pays for a spawned worker (freezing is invisible; the payoff is waking on a later
+  @mention). A **human-launched session** (`spawned_by IS NULL`) never parks: it sets
+  its barrier status as usual, then returns control — a later @mention reaches it on
+  the human's next prompt. This also dissolves the solo-lead **escalation deadlock**
+  (a lone lead parking to wait for the operator's answer to its own `@human`, on the
+  very terminal that answer would be typed into). The DB `status` still gates the
+  barrier, so a spawned fleet with a human-driver lead coordinates correctly. Override
+  with `AGORA_PARK` (`1` = always park, `0` = never park).
 - **Ceiling** (`MAX_PARK_SECONDS`, default **2h**; env `GROUPCHAT_MAX_PARK`): a
   continuously-parked agent is released regardless, so a mis-set `GROUPCHAT_TEAM_SIZE`
   can't hang everyone. Raise it for long-running goals so a finished agent isn't
@@ -200,6 +211,11 @@ blocks). So `stop.py` keeps a finished agent alive until the *whole team* is don
     barrier is trustworthy immediately (else a 90s grace applies).
   - `GROUPCHAT_SOLO_GRACE` — settle window for a lone, *undeclared* agent before its
     barrier may complete (default 10; `0` = exit at once, never wait).
+  - `AGORA_PARK` — override the attended-vs-spawned park heuristic: `1`/`always` forces
+    parking even for a human-launched session (a manual multi-terminal team that wants
+    finished terminals to auto-wake); `0`/`never` forces no-park even for a spawned one
+    (a spawned session a human drives as their primary terminal). Unset = the heuristic
+    (only `spawned_by`-set workers park).
 
 ### The work-division layer (tasks, assignment, shared goal)
 

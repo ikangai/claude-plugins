@@ -20,7 +20,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _util import Checker, cli, env_for, hook, parse_hook_json, tmp_root  # noqa: E402
+from _util import (Checker, cli, env_for, hook, parse_hook_json,  # noqa: E402
+                   tmp_root, worker_env)
 
 STOP = {"hook_event_name": "Stop", "stop_hook_active": False}
 
@@ -30,8 +31,10 @@ def test_lead_with_open_escalation_parks(c):
     BLOCK (park) even though the barrier (team_size=1) would otherwise release it —
     the operator hasn't answered yet."""
     with tmp_root() as root:
-        env = env_for(root, GROUPCHAT_TEAM_SIZE=1, GROUPCHAT_PARK_WINDOW=0,
-                      GROUPCHAT_POLL_TICK=0.1, GROUPCHAT_MAX_PARK=3600)
+        # A spawned lead (unattended): the escalation gate parks it. An attended lead
+        # would instead return control so the operator can answer by typing.
+        env = worker_env(root, GROUPCHAT_TEAM_SIZE=1, GROUPCHAT_PARK_WINDOW=0,
+                         GROUPCHAT_POLL_TICK=0.1, GROUPCHAT_MAX_PARK=3600)
         cli(["init"], env)
         cli(["register", "--session", "s1", "--from", "ada"], env)   # lone → floor lead
         cli(["send", "--from", "ada", "@human ok to ship?"], env)     # escalation
@@ -82,8 +85,8 @@ def test_awaiting_lead_holds_the_whole_team(c):
     a question to the human still open. (Lone-lead cases above isolate the gate;
     this is the real use case the gate exists for.)"""
     with tmp_root() as root:
-        env = env_for(root, GROUPCHAT_TEAM_SIZE=2, GROUPCHAT_PARK_WINDOW=0,
-                      GROUPCHAT_POLL_TICK=0.1, GROUPCHAT_MAX_PARK=3600)
+        env = worker_env(root, GROUPCHAT_TEAM_SIZE=2, GROUPCHAT_PARK_WINDOW=0,  # spawned fleet
+                         GROUPCHAT_POLL_TICK=0.1, GROUPCHAT_MAX_PARK=3600)
         cli(["init"], env)
         cli(["register", "--session", "s1", "--from", "ada"], env)   # floor lead
         cli(["register", "--session", "s2", "--from", "bohr"], env)  # worker

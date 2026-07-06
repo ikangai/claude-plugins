@@ -77,6 +77,7 @@ def test_standdown_releases_parked_agent(c):
         env = dict(env)
         env["GROUPCHAT_TEAM_SIZE"] = "2"     # barrier needs 2 -> alice would park
         env["GROUPCHAT_PARK_WINDOW"] = "0"   # skip the sleep loop in the hook
+        env["GROUPCHAT_SPAWNED_BY"] = "orchestrator"  # spawned worker: only these park
         cli(["register", "--session", "s_alice", "--from", "alice"], env)
         cli(["register", "--session", "s_bob", "--from", "bob"], env)
         # Control: with no standdown, alice (bob not done) parks -> block.
@@ -132,6 +133,7 @@ def test_dismiss_releases_one_agent(c):
         env = dict(env)
         env["GROUPCHAT_TEAM_SIZE"] = "2"
         env["GROUPCHAT_PARK_WINDOW"] = "0"
+        env["GROUPCHAT_SPAWNED_BY"] = "orchestrator"  # spawned worker: only these park
         cli(["register", "--session", "s_alice", "--from", "alice"], env)  # floor lead
         cli(["register", "--session", "s_bob", "--from", "bob"], env)
         c.check("bob parks while the team is unfinished",
@@ -315,6 +317,7 @@ def test_dismissal_is_one_shot_on_revival(c):
         env = dict(env)
         env["GROUPCHAT_TEAM_SIZE"] = "2"
         env["GROUPCHAT_PARK_WINDOW"] = "0"
+        env["GROUPCHAT_SPAWNED_BY"] = "orchestrator"  # spawned worker: only these park
         cli(["register", "--session", "s_alice", "--from", "alice"], env)  # lead
         cli(["register", "--session", "s_bob", "--from", "bob"], env)
         cli(["dismiss", "bob", "--from", "alice"], env)
@@ -368,6 +371,7 @@ def test_standdown_releases_an_escalating_lead(c):
     with tmp_root() as root:
         env = init_room(root)
         env = dict(env); env["GROUPCHAT_PARK_WINDOW"] = "0"
+        env["GROUPCHAT_SPAWNED_BY"] = "orchestrator"  # spawned worker: only these park
         cli(["register", "--session", "s_alice", "--from", "alice"], env)  # sole -> lead
         cli(["send", "--from", "alice", "@human need a decision"], env)     # open escalation
         c.check("the lead parks on an open escalation (control)",
