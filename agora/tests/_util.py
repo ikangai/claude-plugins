@@ -60,6 +60,15 @@ def env_for(root: str, **extra) -> dict:
     return env
 
 
+def worker_env(root: str, **extra) -> dict:
+    """env_for a *bootstrap-spawned* (unattended) agent — the config that PARKS at the
+    team barrier. A plain ``env_for()`` models a human-launched, *attended* session,
+    which never parks (its terminal must stay responsive); only spawned workers do.
+    ``spawned_by`` is stamped once at register from this env, so pass this to the call
+    that first registers the agent whose park behavior a test exercises."""
+    return env_for(root, GROUPCHAT_SPAWNED_BY="orchestrator", **extra)
+
+
 def cli(args, env, stdin: str | None = None, timeout: int = 30):
     """Run ``chat.py <args>`` and capture the result."""
     return subprocess.run(

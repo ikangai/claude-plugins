@@ -20,7 +20,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _util import Checker, HOOKS, cli, env_for, hook, parse_hook_json, tmp_root  # noqa: E402
+from _util import (Checker, HOOKS, cli, env_for, hook, parse_hook_json,  # noqa: E402
+                   tmp_root, worker_env)
 
 
 # --------------------------------------------------------------------------- #
@@ -201,9 +202,11 @@ def test_stop_parks_when_team_not_done(c):
     (re-park block), not be allowed to stop. The bug makes team_done() raise ->
     stop fails open -> empty output (no block)."""
     with tmp_root() as root:
-        env = env_for(root, GROUPCHAT_TEAM_SIZE=2,
-                      GROUPCHAT_PARK_WINDOW=0, GROUPCHAT_POLL_TICK=0.1,
-                      GROUPCHAT_MAX_PARK=3600)
+        # A spawned worker (unattended): only these park. A human-attended session never
+        # freezes its terminal at the barrier.
+        env = worker_env(root, GROUPCHAT_TEAM_SIZE=2,
+                         GROUPCHAT_PARK_WINDOW=0, GROUPCHAT_POLL_TICK=0.1,
+                         GROUPCHAT_MAX_PARK=3600)
         cli(["init"], env)
         cli(["register", "--session", "s1", "--from", "alice"], env)
         cli(["register", "--session", "s2", "--from", "bob"], env)  # bob never done
@@ -235,9 +238,9 @@ def test_stop_wakes_on_mention_during_park(c):
     """RED until #21: a parked agent must wake when a teammate @mentions it.
     Starts a parked stop hook, injects a mention mid-park, expects a block."""
     with tmp_root() as root:
-        env = env_for(root, GROUPCHAT_TEAM_SIZE=2,
-                      GROUPCHAT_PARK_WINDOW=8, GROUPCHAT_POLL_TICK=0.3,
-                      GROUPCHAT_MAX_PARK=3600)
+        env = worker_env(root, GROUPCHAT_TEAM_SIZE=2,   # spawned worker: parks (see above)
+                         GROUPCHAT_PARK_WINDOW=8, GROUPCHAT_POLL_TICK=0.3,
+                         GROUPCHAT_MAX_PARK=3600)
         cli(["init"], env)
         cli(["register", "--session", "s1", "--from", "alice"], env)
         cli(["register", "--session", "s2", "--from", "bob"], env)  # keeps team unfinished

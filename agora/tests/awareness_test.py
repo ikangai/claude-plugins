@@ -93,6 +93,7 @@ def test_park_message_states_real_cause(c):
     with tmp_root() as root:
         env = init_room(root)
         env = dict(env); env["GROUPCHAT_PARK_WINDOW"] = "0"
+        env["GROUPCHAT_SPAWNED_BY"] = "orchestrator"  # spawned worker: only these park
         # Solo, brand-new cohort (< solo settle grace) -> the lone agent is 'done'
         # but the guard isn't satisfied yet, so `waiting` is empty. The message must
         # NOT claim "teammates" (there are none).
@@ -112,6 +113,7 @@ def test_park_message_states_real_cause(c):
         env = dict(env)
         env["GROUPCHAT_PARK_WINDOW"] = "0"
         env["GROUPCHAT_TEAM_SIZE"] = "2"
+        env["GROUPCHAT_SPAWNED_BY"] = "orchestrator"  # spawned worker: only these park
         cli(["register", "--session", "s1", "--from", "alice"], env)
         cli(["register", "--session", "s2", "--from", "bob"], env)
         # alice stops; bob is still active and not done -> alice waits, message names bob.

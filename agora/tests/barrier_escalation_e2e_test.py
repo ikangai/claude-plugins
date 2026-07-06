@@ -15,7 +15,8 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _util import Checker, GROUPCHAT, cli, env_for, hook, parse_hook_json, tmp_root  # noqa: E402
+from _util import (Checker, GROUPCHAT, cli, hook, parse_hook_json,  # noqa: E402
+                   tmp_root, worker_env)
 
 sys.path.insert(0, GROUPCHAT)
 import chat  # noqa: E402
@@ -25,7 +26,9 @@ ENV_TUNABLES = dict(GROUPCHAT_TEAM_SIZE=2, GROUPCHAT_PARK_WINDOW=0,
 
 
 def _setup(root):
-    env = env_for(root, **ENV_TUNABLES)
+    # Spawned (unattended) agents: the barrier-park + escalation-gate this file exercises
+    # applies to a bootstrap fleet, not a human-attended session (which never parks).
+    env = worker_env(root, **ENV_TUNABLES)
     cli(["init"], env)
     cli(["register", "--session", "s1", "--from", "ada"], env)     # the lead
     cli(["register", "--session", "s2", "--from", "turing"], env)  # a worker

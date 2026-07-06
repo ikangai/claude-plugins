@@ -1,5 +1,37 @@
 # Release notes
 
+## v0.15.3 — 2026-07-06 — attended terminals never park
+
+The Stop-hook team barrier parks a finished agent by **blocking in a `time.sleep` loop**
+inside the hook (dormant, ~0 tokens, wakes on a teammate's `@mention`). But while that
+loop runs the host is waiting for the hook to return — so a **human sitting at that
+terminal** has their next prompt *queued* and the session *frozen* (operator-reported:
+"claude is effectively blocked and prompts are queued"). Worst case is a genuine
+**deadlock**: a solo lead that escalated `@human` parks to wait for the operator's
+answer — on the very terminal that answer would be typed into.
+
+That freeze only earns its keep for an **unattended** worker. So parking is now gated on
+lineage: a **human-launched session** (`spawned_by IS NULL`) never parks — it sets its
+barrier status as before, then returns control; a later `@mention` is delivered on its
+next prompt. Only **bootstrap-spawned workers** (`spawned_by` set once at register, never
+rewritten) still park. The DB `status` column — not the sleep — is what gates the
+barrier, so a spawned fleet with a human-driver lead still coordinates correctly (the
+lead holds the barrier via its `active` status without freezing the human).
+
+- **New override** `AGORA_PARK` (tri-state, fail-open): `1`/`always` forces parking on an
+  attended session (a manually-launched multi-terminal team that *wants* auto-wake);
+  `0`/`never` forces no-park on a spawned one (a spawned session a human drives as their
+  primary terminal); unset = the `spawned_by` heuristic.
+- **Tests** — new `tests/attended_no_park_test.py` (attended never parks incl. the
+  escalation-deadlock case; spawned still parks; both override directions). Six existing
+  barrier/escalation modules now model their agents as spawned workers (via a new
+  `worker_env` helper) — the park/gate they exercise is a spawned-fleet property. Full
+  suite 35/35.
+
+Change is one early-return in `hooks/stop.py` (after the status write, before the park
+loop); `_block_on_mention` and `released_from_barrier` above it are untouched, and the
+whole hook stays fail-open.
+
 ## v0.15.2 — 2026-07-05 — clearer barrier-park status line
 
 The Stop hook's spinner said "⏳ waiting for teammates at the group-chat barrier…",
