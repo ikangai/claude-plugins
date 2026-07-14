@@ -1,5 +1,40 @@
 # Release notes
 
+## v0.15.4 — 2026-07-14 — the attended answer clears the escalation
+
+Operator-reported fleet freeze: "the instances just get into a waiting/blocked state" —
+a lead parked on **16 open `@human` escalation(s)**, teammates at the barrier for 35+
+minutes. Root cause (the code half): an escalation only cleared via the **bus**
+(`answer <id>` / `send --from human "@lead …"`), but the natural operator move at an
+*attended* session is typing the answer **straight into the asker's terminal** — which
+never touched the bus. So the queue stayed open forever, the asker could never go
+`done` (the lead-done gate holds it `active`), and **every spawned worker sat at the
+barrier to the 2h park ceiling**. Nothing ever told the operator the `answer` verb
+exists, so escalations piled up (hence 16).
+
+Fix, in `hooks/user_prompt_submit.py` (same philosophy as v0.15.3's attended-never-park:
+*attended == the human channel is this terminal*):
+
+- **The asker's own prompt answers its escalation.** A UserPromptSubmit in a session
+  with open `@human` escalations posts the operator marker (`sender='human'`,
+  `@<current-handle>`, `[re #id]`) before the unread scan, so the queue batch-clears
+  exactly as an `answer` would — bus-visible, rename-safe, and it rides the same
+  injection (advanced past immediately, so it can never resurface as an "unanswered
+  mention" blocking the asker's next Stop). The asker's next stop marks it `done` and
+  the fleet tears down normally.
+- **Attended terminals learn the verb.** While questions await the operator *elsewhere*,
+  an attended (non-spawned) session's injection carries a one-line nudge naming
+  `questions` / `answer <id> "…"`. Spawned workers get no nudge (their rare prompts
+  stay chore-free). Both additions are fail-open `try` blocks.
+- **Tests** — new `tests/attended_answer_test.py` (prompt-at-asker clears + marker
+  shape; cleared asker reaches `done`; a peer's prompt nudges but never clears;
+  spawned worker unnudged; clear survives a rename). Full suite 36/36.
+
+The deployment half of the report (not a code change): the observed session was
+double-firing a **pre-v0.10 repo-local `.groupchat/` install** *on top of* the plugin,
+and the plugin cache was pinned at **0.15.1** (predating the v0.15.3 attended fix).
+Remove stale `chat.py install` wirings and update the plugin when upgrading.
+
 ## v0.15.3 — 2026-07-06 — attended terminals never park
 
 The Stop-hook team barrier parks a finished agent by **blocking in a `time.sleep` loop**

@@ -384,7 +384,12 @@ never sets a lead behaves byte-identically to the flat system.
   could tear down with the operator's answer still owed. Now the *asker's* session stays
   gated until answered, regardless of a rename/handoff. The operator answers by replying
   `@<current handle>` — that reply **batch-clears** the queue (no new state, no second
-  cursor). Operator commands: `chat.py questions` shows **all** open escalations
+  cursor). **The attended answer also clears (v0.15.4):** a prompt typed into the
+  *asker's own* terminal is the operator responding — `user_prompt_submit.py` posts the
+  operator marker (`sender='human'`, `@<current handle>`, `[re #id]`) so the queue
+  batch-clears without the operator knowing any verb; other *attended* sessions get a
+  one-line `questions`/`answer` nudge while questions are open elsewhere (spawned
+  workers don't). Operator commands: `chat.py questions` shows **all** open escalations
   room-wide (`all_open_escalations` — so a handed-off question is still visible, not just
   the current lead's); `chat.py answer <msg-id> "…"` resolves the asker's *current*
   handle via the frozen author session (so the reply lands after a rename) and wakes it.
