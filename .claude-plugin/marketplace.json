@@ -6,6 +6,11 @@
       "name": "agora",
       "source": "./agora",
       "description": "A self-organizing polity of parallel AI coding-agent sessions on one repo — coordinate via hooks, @mentions, a (per-squad) team barrier, a task ledger, fan-in, a hub-and-spoke lead, an advisory constitution + parliament, cross-CLI bridges, and token tracking. (Formerly groupchat.)"
+    },
+    {
+      "name": "pmo",
+      "source": "./pmo",
+      "description": "PMO assistant for a running CompassAI instance: month-end closure driving, portfolio health briefings, capacity checks, and compliance chasing — via a bundled remote MCP connector (OAuth), no CLI required. Works in Claude Code and Claude Desktop."
     }
   ]
 }

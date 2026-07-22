@@ -1,0 +1,12 @@
+{
+  "name": "pmo",
+  "displayName": "CompassAI PMO Assistant",
+  "version": "0.2.0",
+  "description": "PMO assistant for a running CompassAI instance: month-end closure driving, portfolio health briefings, capacity checks, and compliance chasing — via a bundled remote MCP connector (OAuth), no CLI required.",
+  "author": { "name": "Martin Treiber", "email": "martin.treiber@gmail.com" },
+  "repository": "https://github.com/ikangai/CompassAI",
+  "keywords": ["compassai", "pmo", "portfolio-management", "month-end", "evm"],
+  "mcpServers": {
+    "compassai": { "type": "http", "url": "https://compassai.ikangai.com/mcp" }
+  }
+}
