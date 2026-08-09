@@ -53,6 +53,10 @@ def env_for(root: str, **extra) -> dict:
             env.pop(k, None)
     env["GROUPCHAT_DIR"] = os.path.join(root, ".groupchat")
     env.pop("CLAUDE_PROJECT_DIR", None)
+    # A test run inside a live Claude session inherits that session's native inbox
+    # socket; register() would capture it and send() would push-wake nudges INTO the
+    # developer's own conversation. Scrub it — push tests opt back in via **extra.
+    env.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
     for k in _SCRUB:
         env.pop(k, None)
     for k, v in extra.items():

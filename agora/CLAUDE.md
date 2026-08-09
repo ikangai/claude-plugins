@@ -125,6 +125,39 @@ in different worktrees still share one chat. The committed code (`chat.py`, `hoo
 lives in each checkout under `.groupchat/` (the internal code-dir rename is deferred); the
 runtime `chat.db*` is gitignored.
 
+### Push-wake (native inbox nudge — P1 of the cross-session-messaging adoption)
+
+Claude Code ≥ 2.1.224 binds a per-session Unix **inbox socket** (exported to hooks and
+Bash as `$CLAUDE_CODE_MESSAGING_SOCKET`); a JSON line written to it is delivered to
+that session between tool calls — or **starts a new turn when the session is idle**.
+Agora rides this as a *latency* channel, never a correctness one:
+
+- **Capture:** `register()` stores the env var in a new `agents.inbox` column (NULL =
+  non-Claude host / old version / feature off). Refreshed every register so a resumed
+  session (new pid → new socket) stays reachable; an absent var never erases a stored
+  value.
+- **Nudge:** after `send()` commits a message, `_push_nudges` writes each @mentioned,
+  active, socketed teammate a wake message (`_push_wake`) — payload
+  `{"type":"user","message":{...},"session_id":<recipient>}`. The `session_id` pin
+  makes a recycled socket fail closed (receiver drops a mismatch). The nudge carries an
+  *instruction to `read --from <handle>`*, **never the message body** — the bus row +
+  cursor stay the single delivery path, so nothing double-surfaces and the cursor
+  self-heals whichever hooks a push-started turn fires. The message id in the text
+  defeats the receiver's identical-repeat throttle. `answer` rides `send()`, so an
+  operator's escalation reply wakes the asker immediately.
+- **Who benefits:** *attended* sessions (which never park, v0.15.3) previously learned
+  of an @mention only at the human's next prompt — now they wake at once. Parked agents
+  still wake on the DB tick (the nudge is harmless noise: `read` is idempotent).
+- **Invariants:** every push is fail-open (dead socket / timeout / feature off → send
+  succeeds unchanged); non-chat kinds have no mentions so results/motions never push;
+  sender, reserved tokens, and inactive agents are skipped. The wire format is Claude
+  Code *internals* (`peerProtocol: 1`, undocumented) — nothing may ever gate on a push.
+  Disable with `AGORA_PUSH=0`. Tests isolate via `env_for`'s
+  `CLAUDE_CODE_MESSAGING_SOCKET` scrub (else a suite run inside a live session would
+  nudge the developer's own conversation). Design + blindspot analysis:
+  `docs/plans/2026-08-09-native-cross-session-messaging-blindspot.md` (P2–P4 deferred:
+  roster/native-name bridge, park retirement, headless spawn).
+
 ### The team barrier (parallel `/goal` coordination)
 
 The point: when several instances run the **same** goal in tandem, an agent that
@@ -633,7 +666,8 @@ the constitution layer by `python3 tests/{constitution,cite_review,parliament}_t
 and the parliamentary framing (sessions/agendas/decisions) by `tests/sessions_test.py`;
 squad sharding (per-squad barriers) by `tests/squad_test.py`; the heterogeneous-model
 quorum (capture-visible advisory tally) by `tests/model_quorum_test.py`; the chair-topped
-council (per-squad leads) by `tests/council_test.py`.
+council (per-squad leads) by `tests/council_test.py`; push-wake (native inbox nudges)
+by `tests/push_test.py` (it stands up a real Unix-socket listener).
 
 ```bash
 export GROUPCHAT_DIR=/tmp/gc_test          # isolate from the real room
