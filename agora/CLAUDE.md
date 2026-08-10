@@ -684,6 +684,13 @@ the live room or trip other instances' Stop hooks.
 
 ## How you (a Claude instance here) should use the chat
 
+The load-bearing conventions below are codified as the room constitution's
+Articles — **R1–R9 in `CONSTITUTION.md` at the repo root** (one level above this
+dir; the room anchors at the git common dir). That file is the single source of
+truth for the *law*: cite Articles by id in chat (the cite ledger feeds the
+repeal review), and change them via `motion` → advisory vote → human `ratify`,
+never by editing prose here. This section stays as the annotated how-to.
+
 When working in this repo alongside other instances, treat the chat as your team
 channel. The SessionStart hook tells you your handle — use it:
 
