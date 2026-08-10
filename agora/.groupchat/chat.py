@@ -292,6 +292,32 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # constitution CORE declares PROCEDURE:autonomous — human-ratified rooms
     # never stamp or enact.
     _add_column_if_missing(conn, "motions", "passed_at", "TEXT")
+    # The seat (P5): identity hardening for the binding parliament.
+    # - votes.voter_model — the voter's model FROZEN at cast, so a post-vote model
+    #   change can't manufacture the diversity that unlocks enactment (B3).
+    # - motions.proposer_session — authorship of law survives handle recycling (B7).
+    # - rule_cites.session_id — cite evidence keyed to the citing SESSION, so a
+    #   recycled handle doesn't merge two agents' histories (B7).
+    _add_column_if_missing(conn, "votes", "voter_model", "TEXT")
+    _add_column_if_missing(conn, "motions", "proposer_session", "TEXT")
+    _add_column_if_missing(conn, "rule_cites", "session_id", "TEXT")
+    # Tombstones (B2): a handle-recycle used to DELETE the dead row, destroying the
+    # only link from a historical voter_session to its model/lineage. The reclaim
+    # now copies the row here first, so the electorate stays auditable.
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS agents_gone (
+            session_id  TEXT PRIMARY KEY,
+            handle      TEXT,
+            model       TEXT,
+            first_seen  TEXT,
+            last_seen   TEXT,
+            gone_at     TEXT,
+            spawn_depth INTEGER,
+            spawned_by  TEXT
+        );
+        """
+    )
     # Which parliamentary session a motion/decision-item belongs to (governance framing).
     _add_column_if_missing(conn, "motions", "session_id", "TEXT")
     # The authoring session of a message (the escalation gate keys on it). Part of the
@@ -561,7 +587,7 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
         # so we only ever delete a dead identity; the `_is_active` guard means a race
         # that revived the holder is left alone and the INSERT just retries.
         stale = conn.execute(
-            "SELECT session_id, last_seen FROM agents WHERE handle = ?", (h,)
+            "SELECT * FROM agents WHERE handle = ?", (h,)
         ).fetchone()
         if stale and not _is_active(stale["last_seen"]):
             # Re-assert staleness IN the DELETE (not just the check above): if the
@@ -582,6 +608,19 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
             # floor re-elects instead. Covers BOTH the global chair ('lead') and any squad
             # captaincy ('lead:<squad>') the reclaimed handle held (council layer).
             if cur.rowcount:
+                # Tombstone the reclaimed identity (P5/B2): keep the audit link
+                # from its historical votes/cites to who it was. Fail-open — a
+                # tombstone problem must never block a registration.
+                try:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO agents_gone(session_id, handle, "
+                        "model, first_seen, last_seen, gone_at, spawn_depth, "
+                        "spawned_by) VALUES (?,?,?,?,?,?,?,?)",
+                        (stale["session_id"], h, stale["model"],
+                         stale["first_seen"], stale["last_seen"], ts,
+                         stale["spawn_depth"], stale["spawned_by"]))
+                except Exception:
+                    pass
                 for (k,) in conn.execute(
                         "SELECT key FROM meta WHERE key='lead' OR key LIKE 'lead:%'").fetchall():
                     if (get_meta(conn, k) or "").strip().lower() == h:
@@ -2114,12 +2153,15 @@ def send(conn, sender: str, body: str, session_id: str | None = None,
     # system announcements naming a rule must NOT count as cites (a motion would
     # otherwise shield the very rule it aims to change; a ratify announcement would
     # self-cite). Cites are the advisory behavioral signal the repeal review runs on.
-    if kind == "chat" and "<!-- CONSTITUTION:" not in body:
+    # sender 'system' never cites (P5/B5): procedure notices (stamps, enactments)
+    # are chat-kind broadcasts that may name the very rule under amendment — a
+    # rule must not accumulate evidence from the machinery talking about it.
+    if kind == "chat" and sender != "system" and "<!-- CONSTITUTION:" not in body:
         for rid in parse_rules(body):
             conn.execute(
-                "INSERT INTO rule_cites(ts, rule_id, sender, message_id) "
-                "VALUES (?,?,?,?)",
-                (now_iso(), rid, sender, msg_id),
+                "INSERT INTO rule_cites(ts, rule_id, sender, message_id, session_id) "
+                "VALUES (?,?,?,?,?)",
+                (now_iso(), rid, sender, msg_id, session_id),
             )
     conn.commit()
     # Push-wake AFTER the commit so a nudged recipient's `read` already sees the
@@ -3372,6 +3414,13 @@ _CONST_ZONES = {"core": (_CORE_BEGIN, _CORE_END), "articles": (_ART_BEGIN, _ART_
 # --autonomous), exactly like any other Core change.
 _PROCEDURE_MARK_AUTONOMOUS = "<!-- CONSTITUTION:PROCEDURE:autonomous -->"
 _PROCEDURE_RE = re.compile(r"<!--\s*CONSTITUTION:PROCEDURE:(\w+)\s*-->")
+# The BAR marker (P5/B1): the enactment thresholds stated IN the law, CORE zone
+# only. Before this, _enact_params read them from the INVOKING PROCESS's env — so
+# any agent could sweep with quorum=1 and enact a one-vote motion. Keys the
+# document states win; keys it omits fall back to env, then defaults. Like the
+# PROCEDURE marker it lives where motions can't write, so the parliament cannot
+# lower its own bar; a human edits it in git.
+_BAR_RE = re.compile(r"<!--\s*CONSTITUTION:BAR:([^>]*?)-->", re.DOTALL)
 
 
 def constitution_procedure(text: str) -> str:
@@ -3379,6 +3428,28 @@ def constitution_procedure(text: str) -> str:
     PROCEDURE:autonomous marker, else ``'human'`` (every pre-existing document)."""
     m = _PROCEDURE_RE.search(_const_zone(text, "core") or "")
     return "autonomous" if (m and m.group(1).lower() == "autonomous") else "human"
+
+
+def constitution_bar(text: str) -> dict:
+    """Thresholds the document itself states (CORE-zone BAR marker). Keys:
+    ``supermajority`` (float), ``quorum``/``diversity``/``window`` (ints).
+    Unparseable tokens are skipped (fail toward env/defaults, never a crash)."""
+    m = _BAR_RE.search(_const_zone(text, "core") or "")
+    out: dict = {}
+    if not m:
+        return out
+    for tok in m.group(1).split():
+        if "=" not in tok:
+            continue
+        k, v = tok.split("=", 1)
+        try:
+            if k == "supermajority":
+                out[k] = float(v)
+            elif k in ("quorum", "diversity", "window"):
+                out[k] = int(v)
+        except ValueError:
+            continue
+    return out
 _CORE_ID_RE = re.compile(r"^###\s+(C\d+)\b[ \t]*[—:-]?[ \t]*(.*)$", re.MULTILINE)
 _ART_ID_RE = re.compile(r"^###\s+(R\d+)\b[ \t]*[—:-]?[ \t]*(.*)$", re.MULTILINE)
 _PROV_RE = re.compile(r"<!--\s*meta:\s*(.*?)\s*-->")
@@ -3399,12 +3470,15 @@ def _starter_constitution(today: str, autonomous: bool = False) -> str:
         c4 = (
             "### C4 — The amendment procedure\n"
             f"{_PROCEDURE_MARK_AUTONOMOUS}\n"
-            "An Article changes when a motion holds, for the whole objection window:\n"
-            "(a) a supermajority of the cast votes, (b) a quorum of registered\n"
-            "voters, and (c) voters from at least two distinct models. The\n"
-            "parliament then applies the diff and commits it. This Core section\n"
-            "stays outside the procedure: it changes only by a direct human edit\n"
-            "in git.\n")
+            "<!-- CONSTITUTION:BAR: supermajority=0.66 quorum=3 diversity=2 "
+            "window=3600 -->\n"
+            "An Article changes when a motion holds, for the whole objection window\n"
+            "(the BAR line above — the numbers ARE the law; no caller's environment\n"
+            "can lower them): (a) a supermajority of the cast votes, (b) a quorum of\n"
+            "present registered voters, and (c) voters from at least two distinct\n"
+            "models. The parliament then applies the diff and commits it. This Core\n"
+            "section stays outside the procedure: it changes only by a direct human\n"
+            "edit in git.\n")
         art_head = "## Articles (amendable by the parliament — autonomous enactment)\n\n"
     else:
         c1 = (
@@ -3580,18 +3654,23 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _rule_cite_sender_sets(conn, days: int = 0) -> dict:
-    """``{rule_id: set(senders)}`` over the window (days=0 → all-time)."""
+    """``{rule_id: set(citing identities)}`` over the window (days=0 → all-time).
+    Identity is the citing SESSION when recorded (P5/B7 — a recycled handle no
+    longer merges two agents' evidence), falling back to the sender handle for
+    legacy rows and unregistered senders."""
     if days and days > 0:
         from datetime import datetime, timezone, timedelta
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
             "%Y-%m-%dT%H:%M:%SZ")
         rows = conn.execute(
-            "SELECT rule_id, sender FROM rule_cites WHERE ts >= ?", (cutoff,)).fetchall()
+            "SELECT rule_id, sender, session_id FROM rule_cites WHERE ts >= ?",
+            (cutoff,)).fetchall()
     else:
-        rows = conn.execute("SELECT rule_id, sender FROM rule_cites").fetchall()
+        rows = conn.execute(
+            "SELECT rule_id, sender, session_id FROM rule_cites").fetchall()
     by = {}
     for r in rows:
-        by.setdefault(r["rule_id"], set()).add(r["sender"])
+        by.setdefault(r["rule_id"], set()).add(r["session_id"] or r["sender"])
     return by
 
 
@@ -3742,44 +3821,58 @@ def _unified_diff(old: str, new: str, path: str) -> str:
 
 
 def motion_tally(conn, motion_id: int) -> dict:
-    """Advisory tally: distinct registered voters, last vote per session wins.
+    """PRESENCE-WEIGHTED tally (P5): last vote per session wins, and a vote COUNTS
+    only while its caster is present in the chamber (a currently-active registered
+    session). A departed session's vote is retained in ``detail`` (the record) and
+    counted in ``departed``, but excluded from yea/nay/voters/diversity — so the
+    ghost electorate (mint-vote-exit, dead cohorts) can't hold quorum or
+    supermajority; a returning session's vote counts again without re-casting.
 
-    Also reports model DIVERSITY among the casting voters (the heterogeneous-model
-    quorum): ``models`` = distinct known models, and ``single_model`` = True when 2+
-    voters all share ONE known model (a homogeneous-fleet sweep — low epistemic
-    independence, the capture signal). This is purely advisory annotation; it never
-    gates or binds anything. Unknown (NULL) models don't count toward diversity, and the
-    reading reflects each voter's CURRENT model (a post-vote `model` change re-annotates)
-    — the conservative direction is silence, never a false bind."""
+    Model DIVERSITY uses the model FROZEN into the vote at cast (``voter_model``;
+    legacy pre-P5 votes fall back to the caster's current row), so a post-vote
+    `model` change cannot manufacture the diversity that unlocks enactment.
+    Since v0.16.0 this tally GATES autonomous enactment (_motion_passing); in
+    human-ratified rooms it remains advisory annotation."""
     rows = conn.execute(
-        "SELECT voter_session, voter_handle, vote FROM votes WHERE motion_id=? ORDER BY id",
-        (motion_id,)).fetchall()
+        "SELECT voter_session, voter_handle, vote, voter_model FROM votes "
+        "WHERE motion_id=? ORDER BY id", (motion_id,)).fetchall()
     last = {}
     for r in rows:
-        last[r["voter_session"]] = (r["voter_handle"], r["vote"])
-    yea = sum(1 for _h, v in last.values() if v == "yea")
-    nay = sum(1 for _h, v in last.values() if v == "nay")
-    # Map each casting session to its current model (NULL/unknown excluded from diversity).
-    models_by_session = {row["session_id"]: row["model"]
-                         for row in conn.execute("SELECT session_id, model FROM agents")}
-    known = [models_by_session.get(s) for s in last if models_by_session.get(s)]
+        last[r["voter_session"]] = (r["voter_handle"], r["vote"], r["voter_model"])
+    active = {a["session_id"]: a for a in active_agents(conn)}
+    present = {s: t for s, t in last.items() if s in active}
+    yea = sum(1 for _h, v, _m in present.values() if v == "yea")
+    nay = sum(1 for _h, v, _m in present.values() if v == "nay")
+    known = []
+    for s, (_h, _v, frozen) in present.items():
+        model = frozen or active[s]["model"]
+        if model:
+            known.append(model)
     distinct = set(known)
-    single_model = len(last) >= 2 and len(distinct) == 1 and len(known) == len(last)
-    return {"yea": yea, "nay": nay, "voters": len(last),
+    single_model = (len(present) >= 2 and len(distinct) == 1
+                    and len(known) == len(present))
+    return {"yea": yea, "nay": nay, "voters": len(present),
+            "departed": len(last) - len(present),
             "models": len(distinct), "single_model": single_model,
-            "detail": [(s, h, v) for s, (h, v) in last.items()]}
+            "detail": [(s, h, v) for s, (h, v, _m) in last.items()]}
 
 
 def _diversity_note(t: dict) -> str:
     """Advisory model-diversity annotation for a tally — surfaces the capture signal so a
-    human can weigh it. Empty (dormant) until 2+ votes are cast."""
+    human can weigh it. Empty (dormant) until 2+ votes are cast. Also names any
+    departed (not-counted) votes so a presence-weighted tally is never mistaken
+    for the full record."""
+    note = ""
+    if t.get("departed"):
+        note = f" · {t['departed']} departed vote(s) not counted"
     if (t["yea"] + t["nay"]) < 2:
-        return ""
+        return note
     if t.get("single_model"):
-        return " · ⚠ single-model vote — low epistemic independence (homogeneous fleet)"
+        return (" · ⚠ single-model vote — low epistemic independence "
+                "(homogeneous fleet)") + note
     if t.get("models", 0) >= 2:
-        return f" · {t['models']} models (cross-model support)"
-    return ""
+        return f" · {t['models']} models (cross-model support)" + note
+    return note
 
 
 # --------------------------------------------------------------------------- #
@@ -3802,12 +3895,18 @@ def _diversity_note(t: dict) -> str:
 # motion() AND skipped here AND _apply_amendment only writes inside the
 # ARTICLES zone — so the parliament can never amend its own procedure; and
 # op='decide' items are excluded exactly as in ratify (the law/decision wall).
-def _enact_params() -> tuple[float, int, int, int]:
-    """(supermajority, quorum, distinct-model floor, objection-window seconds)."""
-    return (_env_float("GROUPCHAT_AMEND_SUPERMAJORITY", 0.66),
-            _env_int("GROUPCHAT_AMEND_QUORUM", 3) or 3,
-            _env_int("AGORA_ENACT_DIVERSITY", 2) or 2,
-            max(0, _env_int("AGORA_ENACT_DELAY", 3600) or 0))
+def _enact_params(text: str | None = None) -> tuple[float, int, int, int]:
+    """(supermajority, quorum, distinct-model floor, objection-window seconds).
+
+    Resolution per key (P5/B1): the DOCUMENT's CORE-zone BAR marker wins, then the
+    env, then the default — so in a room whose law states its bar, no caller's
+    environment can lower it. Pass the constitution text whenever you have it."""
+    bar = constitution_bar(text) if text else {}
+    return (bar.get("supermajority",
+                    _env_float("GROUPCHAT_AMEND_SUPERMAJORITY", 0.66)),
+            bar.get("quorum", _env_int("GROUPCHAT_AMEND_QUORUM", 3) or 3),
+            bar.get("diversity", _env_int("AGORA_ENACT_DIVERSITY", 2) or 2),
+            max(0, bar.get("window", _env_int("AGORA_ENACT_DELAY", 3600) or 0)))
 
 
 def _motion_passing(t: dict, superq: float, quorum: int, diversity: int) -> bool:
@@ -3857,12 +3956,45 @@ def _git_commit_constitution(path: str, message: str) -> str | None:
         return str(e)[:200]
 
 
+_ENACT_LOCK_STALE_SECONDS = 120
+
+
+def _enact_lock() -> bool:
+    """Serialize sweeps (P5/B4): two concurrent sweeps holding stale text could
+    cross-clobber each other's enactments — the parliament violating C3. An
+    O_EXCL lockfile beside the db is the chamber's single speaker's-gavel; a
+    stale lock (crashed sweeper) is broken after _ENACT_LOCK_STALE_SECONDS.
+    Returns False when another sweep holds it (callers just skip — the holder
+    will do the work) or on any error (fail-safe: no lock, no enactment)."""
+    lock = os.path.join(store_dir(), "enact.lock")
+    try:
+        if (os.path.exists(lock)
+                and time.time() - os.path.getmtime(lock) > _ENACT_LOCK_STALE_SECONDS):
+            os.unlink(lock)
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+    except Exception:
+        return False
+
+
+def _enact_unlock() -> None:
+    try:
+        os.unlink(os.path.join(store_dir(), "enact.lock"))
+    except Exception:
+        pass
+
+
 def sweep_enactments(conn) -> dict:
     """Advance every open constitutional motion through the autonomous procedure.
     Returns {'procedure', 'stamped', 'cancelled', 'enacted', 'lapsed', 'pending'}
     (motion-id lists; 'pending' is [(id, seconds_left)]). A no-op — empty lists,
     procedure 'human' — anywhere the constitution is absent, malformed, or
-    human-ratified."""
+    human-ratified. Serialized by _enact_lock; thresholds resolve document-first
+    (_enact_params(text), P5/B1)."""
     out = {"procedure": "human", "stamped": [], "cancelled": [],
            "enacted": [], "lapsed": [], "pending": []}
     path = constitution_path()
@@ -3873,77 +4005,107 @@ def sweep_enactments(conn) -> dict:
     if not parsed["ok"] or constitution_procedure(text) != "autonomous":
         return out
     out["procedure"] = "autonomous"
-    superq, quorum, diversity, delay = _enact_params()
-    rows = conn.execute("SELECT * FROM motions WHERE status='open' "
-                        "AND op != 'decide' ORDER BY id").fetchall()
-    for m in rows:
-        if re.fullmatch(r"C\d+", m["target"] or ""):
-            continue  # entrenched Core: unreachable belt-and-braces
-        t = motion_tally(conn, m["id"])
-        passing = _motion_passing(t, superq, quorum, diversity)
-        passed_at = m["passed_at"]
-        if passing and not passed_at:
-            passed_at = now_iso()
-            conn.execute("UPDATE motions SET passed_at=? WHERE id=?",
-                         (passed_at, m["id"]))
+    if not _enact_lock():
+        return out  # another sweep holds the chamber; it will do this work
+    try:
+        superq, quorum, diversity, delay = _enact_params(text)
+        rows = conn.execute("SELECT * FROM motions WHERE status='open' "
+                            "AND op != 'decide' ORDER BY id").fetchall()
+        for m in rows:
+            if re.fullmatch(r"C\d+", m["target"] or ""):
+                continue  # entrenched Core: unreachable belt-and-braces
+            t = motion_tally(conn, m["id"])
+            passing = _motion_passing(t, superq, quorum, diversity)
+            passed_at = m["passed_at"]
+            if passing and not passed_at:
+                passed_at = now_iso()
+                conn.execute("UPDATE motions SET passed_at=? WHERE id=?",
+                             (passed_at, m["id"]))
+                # A REAL broadcast (P5/B5), not a quiet system row: @team expands
+                # to every active teammate, so the stamp blocks Stops, rides the
+                # push-wake nudge, and wakes a parked fleet — an objection window
+                # nobody hears about isn't one. sender='system' is excluded from
+                # cite harvesting in send().
+                send(conn, "system",
+                     f"@team Constitution: M{m['id']} ({m['op']} {m['target']}) "
+                     f"holds the enactment bar (yea {t['yea']}/nay {t['nay']}, "
+                     f"{t['models']} models) — objection window open, enacts in "
+                     f"~{delay // 60}m. To object: vote nay "
+                     f"(operator/lead: `object M{m['id']}`).", kind="chat")
+                conn.commit()
+                out["stamped"].append(m["id"])
+            elif not passing and passed_at:
+                conn.execute("UPDATE motions SET passed_at=NULL WHERE id=?",
+                             (m["id"],))
+                send(conn, "system",
+                     f"Constitution: M{m['id']} fell below the enactment bar — "
+                     "enactment cancelled (the window restarts if it re-passes).",
+                     kind="system")
+                conn.commit()
+                out["cancelled"].append(m["id"])
+                continue
+            if not (passing and passed_at):
+                continue
+            left = delay - iso_age_seconds(passed_at)
+            if left > 0:
+                out["pending"].append((m["id"], int(left)))
+                continue
+            # Fresh-read immediately before the write (P5/B4): with the lock held
+            # this guards against non-sweep writers (a human editing the law
+            # mid-window) and carries forward this sweep's own prior enactments.
+            text = open(path).read()
+            parsed = parse_constitution(text)
+            if not parsed["ok"] or constitution_procedure(text) != "autonomous":
+                break  # never write onto a document we can't trust
+            err = _motion_applicable(m, text, parsed)
+            if err:
+                conn.execute("UPDATE motions SET status='lapsed' WHERE id=?",
+                             (m["id"],))
+                send(conn, "system",
+                     f"Constitution: M{m['id']} could not be enacted ({err}) — "
+                     "lapsed.", kind="system")
+                conn.commit()
+                out["lapsed"].append(m["id"])
+                continue
+            new_text = _apply_amendment(text, m, now_iso()[:10])
+            with open(path, "w") as fh:
+                fh.write(new_text)
+            conn.execute("UPDATE motions SET status='enacted' WHERE id=?",
+                         (m["id"],))
             send(conn, "system",
-                 f"Constitution: M{m['id']} ({m['op']} {m['target']}) holds the "
-                 f"enactment bar (yea {t['yea']}/nay {t['nay']}, {t['models']} models) "
-                 f"— objection window open, enacts in ~{delay // 60}m. To object: "
-                 f"vote nay.", kind="system")
-            conn.commit()
-            out["stamped"].append(m["id"])
-        elif not passing and passed_at:
-            conn.execute("UPDATE motions SET passed_at=NULL WHERE id=?", (m["id"],))
-            send(conn, "system",
-                 f"Constitution: M{m['id']} fell below the enactment bar — "
-                 "enactment cancelled (the window restarts if it re-passes).",
+                 f"Constitution: M{m['id']} ENACTED by the parliament "
+                 f"({m['op']} {m['target']}; yea {t['yea']}/nay {t['nay']}, "
+                 f"{t['voters']} voters, {t['models']} models). Re-read the law.",
                  kind="system")
             conn.commit()
-            out["cancelled"].append(m["id"])
-            continue
-        if not (passing and passed_at):
-            continue
-        left = delay - iso_age_seconds(passed_at)
-        if left > 0:
-            out["pending"].append((m["id"], int(left)))
-            continue
-        err = _motion_applicable(m, text, parsed)
-        if err:
-            conn.execute("UPDATE motions SET status='lapsed' WHERE id=?", (m["id"],))
-            send(conn, "system",
-                 f"Constitution: M{m['id']} could not be enacted ({err}) — lapsed.",
-                 kind="system")
-            conn.commit()
-            out["lapsed"].append(m["id"])
-            continue
-        new_text = _apply_amendment(text, m, now_iso()[:10])
-        with open(path, "w") as fh:
-            fh.write(new_text)
-        conn.execute("UPDATE motions SET status='enacted' WHERE id=?", (m["id"],))
-        send(conn, "system",
-             f"Constitution: M{m['id']} ENACTED by the parliament "
-             f"({m['op']} {m['target']}; yea {t['yea']}/nay {t['nay']}, "
-             f"{t['voters']} voters, {t['models']} models). Re-read the law.",
-             kind="system")
-        conn.commit()
-        commit_err = _git_commit_constitution(
-            path,
-            f"parliament: enact M{m['id']} ({m['op']} {m['target']})\n\n"
-            f"yea {t['yea']} / nay {t['nay']} ({t['voters']} voters, "
-            f"{t['models']} distinct models)\nbecause: {(m['because'] or '')[:200]}\n\n"
-            "Enacted autonomously by the agora parliament (PROCEDURE:autonomous).")
-        if commit_err:
-            print(f"note: enactment audit commit failed ({commit_err}) — the law "
-                  f"file is updated; commit {os.path.basename(path)} manually.",
-                  file=sys.stderr)
-        out["enacted"].append(m["id"])
-        # Later motions in this sweep must see the amended law.
-        text = new_text
-        parsed = parse_constitution(text)
-        if not parsed["ok"]:
-            break  # never compound onto a document we can no longer parse
+            commit_err = _git_commit_constitution(
+                path,
+                f"parliament: enact M{m['id']} ({m['op']} {m['target']})\n\n"
+                f"yea {t['yea']} / nay {t['nay']} ({t['voters']} voters, "
+                f"{t['models']} distinct models)\nbecause: "
+                f"{(m['because'] or '')[:200]}\n\n"
+                "Enacted autonomously by the agora parliament "
+                "(PROCEDURE:autonomous).")
+            if commit_err:
+                print(f"note: enactment audit commit failed ({commit_err}) — the "
+                      f"law file is updated; commit {os.path.basename(path)} "
+                      "manually.", file=sys.stderr)
+            out["enacted"].append(m["id"])
+            text = new_text
+    finally:
+        _enact_unlock()
     return out
+
+
+def recent_enactments(conn, limit: int = 3) -> list:
+    """The latest autonomous enactment notices — surfaced in the SessionStart
+    briefing (P5/B8) so a new cohort inherits recent law changes pushed, not
+    pulled. Chronological order."""
+    rows = conn.execute(
+        "SELECT * FROM messages WHERE kind='system' AND body LIKE "
+        "'%ENACTED%Re-read the law%' ORDER BY id DESC LIMIT ?",
+        (limit,)).fetchall()
+    return list(reversed(rows))
 
 
 def _report_sweep(res: dict) -> None:
@@ -4170,9 +4332,11 @@ def cmd_motion(args):
                  "WHERE target=? AND status='open' AND op!='decide'", (tgt_key,))
     conn.execute(
         "INSERT INTO motions(id, ts, proposer, target, op, change, because, "
-        "base_text, new_id, title, status) VALUES (?,?,?,?,?,?,?,?,?,?, 'open')",
+        "base_text, new_id, title, status, proposer_session) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?, 'open', ?)",
         (mid, now_iso(), proposer, tgt_key, op, change, because, base_text, new_id,
-         (getattr(args, "title", None) or None)))
+         (getattr(args, "title", None) or None),
+         (a["session_id"] if a else None)))
     conn.commit()
     res = sweep_enactments(conn)  # keeps other motions' windows moving; no-op in human rooms
     if res["procedure"] == "autonomous":
@@ -4221,9 +4385,12 @@ def cmd_vote(args):
         return 1
     send(conn, a["handle"], f"M{mid} {args.vote}",
          session_id=a["session_id"], kind="vote")
-    conn.execute("INSERT INTO votes(ts, motion_id, voter_session, voter_handle, vote) "
-                 "VALUES (?,?,?,?,?)",
-                 (now_iso(), mid, a["session_id"], a["handle"], args.vote))
+    # The voter's model is FROZEN into the vote (P5/B3): the diversity gate reads
+    # this, so changing your declared model after casting can't unlock enactment.
+    conn.execute("INSERT INTO votes(ts, motion_id, voter_session, voter_handle, "
+                 "vote, voter_model) VALUES (?,?,?,?,?,?)",
+                 (now_iso(), mid, a["session_id"], a["handle"], args.vote,
+                  a["model"]))
     conn.commit()
     # Every vote advances the autonomous procedure (no-op in human-ratified rooms).
     res = sweep_enactments(conn)
@@ -4249,7 +4416,11 @@ def cmd_amendments(args):
     if not rows:
         print("no motions yet." if show_all else "no open motions.")
         return 0
-    superq, quorum, diversity, delay = _enact_params()
+    # Thresholds resolve DOCUMENT-first (P5/B1) so the display can't disagree
+    # with what the sweep would actually enforce.
+    cpath = constitution_path()
+    ctext = open(cpath).read() if os.path.exists(cpath) else None
+    superq, quorum, diversity, delay = _enact_params(ctext)
     pending = dict(res["pending"])
     if auto:
         print("Motions — AUTONOMOUS procedure: a motion holding the bar "
@@ -4280,6 +4451,51 @@ def cmd_amendments(args):
         print(f"      yea {t['yea']} / nay {t['nay']}  ({t['voters']} registered voters)"
               f"{_diversity_note(t)} — {flag}")
         print(f"      because: {(m['because'] or '')[:100]}")
+    return 0
+
+
+def cmd_object(args):
+    """[operator/lead] Object to a stamped motion (P5/B6): clears the objection-
+    window stamp so the motion must hold the bar for a FRESH window. One voice,
+    not a veto — the parliament may re-pass and the window simply restarts —
+    but it restores what removing human ratification also removed by accident:
+    a lawful way for the operator to say 'wait' before an enactment, without
+    resorting to post-hoc git reverts. (The operator has no seat and cannot
+    vote nay; this is their procedural voice.)"""
+    conn = connect()
+    mid = _parse_motion_id(args.motion)
+    if mid is None:
+        print(f"bad motion id {args.motion!r}", file=sys.stderr)
+        return 1
+    m = conn.execute("SELECT * FROM motions WHERE id=?", (mid,)).fetchone()
+    if not m or m["op"] == "decide":
+        print(f"no constitutional motion M{mid}", file=sys.stderr)
+        return 1
+    if m["status"] != "open":
+        print(f"M{mid} is {m['status']} — nothing to object to"
+              + (" (already enacted; the remedy is `git revert`)"
+                 if m["status"] == "enacted" else ""), file=sys.stderr)
+        return 1
+    ok, caller, lead = _control_caller_ok(conn, args)
+    if not ok:
+        print(f"only the operator (a bare invocation) or the lead (@{lead}) may "
+              f"object — you are @{caller}; agents object by voting nay.",
+              file=sys.stderr)
+        return 1
+    if not m["passed_at"]:
+        print(f"M{mid} has no objection window open (not currently passing) — "
+              "nothing to clear.", file=sys.stderr)
+        return 1
+    conn.execute("UPDATE motions SET passed_at=NULL WHERE id=?", (mid,))
+    reason = " ".join(args.reason).strip() if args.reason else ""
+    who = caller or "the operator"  # plain name — no self-mention in the broadcast
+    send(conn, "system",
+         f"@team Constitution: OBJECTION by {who} to M{mid} ({m['op']} "
+         f"{m['target']})" + (f": {reason}" if reason else "") +
+         " — the enactment window is cleared; the motion must re-hold the bar "
+         "for a fresh window.", kind="chat")
+    conn.commit()
+    print(f"objection recorded — M{mid}'s window cleared (re-pass required).")
     return 0
 
 
@@ -4845,6 +5061,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("enact", help="run the autonomous-procedure sweep: enact due "
                                       "motions, open/cancel objection windows")
     sp.set_defaults(func=cmd_enact)
+
+    sp = sub.add_parser("object", help="[operator/lead] object to a stamped motion — "
+                                       "clears its enactment window (re-pass required)")
+    add_identity(sp)
+    sp.add_argument("motion", help="motion id, e.g. M12")
+    sp.add_argument("reason", nargs="*", help="optional reason, recorded in the broadcast")
+    sp.set_defaults(func=cmd_object)
 
     sp = sub.add_parser("review", help="repeal-first constitution review (advisory)")
     sp.add_argument("--days", type=int, default=0, help="cite window in days (0 = all-time)")

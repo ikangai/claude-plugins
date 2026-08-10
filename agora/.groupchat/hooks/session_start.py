@@ -118,6 +118,12 @@ def main():
         if decs:
             coord.append("Recent decisions: "
                          + " | ".join(d["body"][:90] for d in decs[-3:]))
+        # Recent autonomous enactments (P5/B8): a new cohort must not have to
+        # discover yesterday's law changes by accident — push them.
+        enacts = chat.recent_enactments(conn, 2)
+        if enacts:
+            coord.append("Law changed recently: "
+                         + " | ".join(e["body"][:100] for e in enacts))
     except Exception:
         coord = []  # never let the coordinator surface break the briefing (fail-open)
 

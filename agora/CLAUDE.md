@@ -527,8 +527,10 @@ python3 .groupchat/chat.py vote --session <id> M12 yea   # registered session on
 python3 .groupchat/chat.py model claude-opus-4-8 --from ada   # your model (feeds the enactment diversity floor)
 python3 .groupchat/chat.py amendments             # open CONSTITUTIONAL motions + tallies (+ model diversity/windows)
 python3 .groupchat/chat.py enact                  # [autonomous] sweep: enact due motions, open/cancel windows
+python3 .groupchat/chat.py object M12 "needs a human read"   # [operator/lead] clear a motion's window (re-pass required)
 python3 .groupchat/chat.py ratify M12             # human: evidence dossier + diff (autonomous: --confirm = early enact)
-AGORA_ENACT_DELAY=3600 AGORA_ENACT_DIVERSITY=2 python3 .groupchat/chat.py enact   # objection window / model floor
+# Thresholds live in the LAW (the CORE-zone BAR marker beats any env); env is the fallback:
+AGORA_ENACT_DELAY=3600 AGORA_ENACT_DIVERSITY=2 python3 .groupchat/chat.py enact
 
 # Parliamentary framing — sessions / agendas / decisions (advisory; binds nothing)
 python3 .groupchat/chat.py session open "rework the auth module" --from ada   # a deliberation window
@@ -672,6 +674,36 @@ Three layers:
   votes stay advisory, nothing stamps, `enact` explains and does nothing. Design:
   `docs/plans/2026-08-10-autonomous-parliament-design.md`.
 
+- **P5 — the seat (identity hardening for the binding parliament).** The
+  seat/identity/memory blindspot pass
+  (`docs/plans/2026-08-10-parliament-seat-identity-memory-blindspot.md`) found the
+  advisory-era assumptions P4 had silently made load-bearing; P5 closes them:
+  **(B1)** thresholds moved INTO the law — a CORE-zone
+  `<!-- CONSTITUTION:BAR: supermajority=… quorum=… diversity=… window=… -->`
+  marker wins over any caller's env (per-key; unstated keys fall back env→default),
+  so no agent can sweep with `QUORUM=1` and enact a one-vote motion; like the
+  PROCEDURE marker it lives where motions can't write. **(B2)** the tally is
+  **presence-weighted** — a vote counts only while its caster is an *active*
+  session (departed votes are kept in the record and named in the display, a
+  returning session's vote counts again), so ghost electorates can't hold quorum;
+  handle-recycling now **tombstones** the old row into `agents_gone` instead of
+  destroying the audit link. **(B3)** the voter's model is **frozen into the vote
+  at cast** (`votes.voter_model`) — a post-vote `model` change can't manufacture
+  diversity; re-casting under the new model is the legitimate path. **(B4)** sweeps
+  are **serialized** (`enact.lock`, O_EXCL beside the db, stale-broken at 120s) and
+  the document is re-read + re-verified immediately before each write — two
+  concurrent sweeps can no longer cross-clobber enacted law (C3 restored). **(B5)**
+  the stamp notice is a real `@team` **broadcast** (kind `chat` from `system`:
+  blocks Stops, rides push-wake) so the objection window is actually heard;
+  `sender='system'` is excluded from cite harvesting so procedure notices naming a
+  rule never feed its evidence. **(B6)** `object M<n>` gives the operator/lead a
+  procedural voice: clears the stamp (fresh window required; one voice, not a veto
+  — the parliament may re-pass). **(B7)** motions record `proposer_session` and
+  cites key by session (`rule_cites.session_id`, legacy rows fall back to handle) —
+  attribution survives handle recycling. **(B8)** the briefing pushes recent
+  enactments (`recent_enactments`) so a new cohort inherits law changes, not just
+  the last 15 chat lines.
+
 **In a human-ratified room the vote never enacts a change** — a human ratifies from
 verifiable evidence; the tally is one weak input. In an **autonomous** room the
 tally + diversity + window DO enact — the capture defenses shift to the model-
@@ -702,7 +734,9 @@ quorum (capture-visible advisory tally) by `tests/model_quorum_test.py`; the cha
 council (per-squad leads) by `tests/council_test.py`; push-wake (native inbox nudges)
 by `tests/push_test.py` (it stands up a real Unix-socket listener); autonomous
 enactment (P4: the bar, the objection window, TOCTOU-lapse, git audit, human-room
-byte-identity) by `tests/autonomy_test.py`.
+byte-identity) by `tests/autonomy_test.py`; the seat (P5: document-sovereign BAR,
+presence-weighted tally, frozen voter model, the enact lock, the objection
+broadcast/verb, tombstones, session-keyed attribution) by `tests/seat_test.py`.
 
 ```bash
 export GROUPCHAT_DIR=/tmp/gc_test          # isolate from the real room

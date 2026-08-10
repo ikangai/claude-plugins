@@ -53,6 +53,20 @@ def _setup(root, autonomous=True, git=True):
                        capture_output=True)
     args = ["constitution", "init"] + (["--autonomous"] if autonomous else [])
     cli(args, env)
+    if autonomous:
+        # P5/B1: the seeded document states the bar (quorum=3, window=3600) and the
+        # DOCUMENT wins over env. This module drives quorum via env (2) and the
+        # window via AGORA_ENACT_DELAY, so rewrite the BAR: quorum=2 stated in law,
+        # window omitted -> falls back to env (exercising per-key fallback).
+        p = os.path.join(root, "CONSTITUTION.md")
+        with open(p) as fh:
+            txt = fh.read()
+        txt = txt.replace(
+            "<!-- CONSTITUTION:BAR: supermajority=0.66 quorum=3 diversity=2 "
+            "window=3600 -->",
+            "<!-- CONSTITUTION:BAR: supermajority=0.66 quorum=2 diversity=2 -->")
+        with open(p, "w") as fh:
+            fh.write(txt)
     for sid, h, model in (("s1", "ada", "claude-opus-4-8"),
                           ("s2", "turing", "claude-opus-4-8"),
                           ("s3", "hopper", "claude-sonnet-5")):
