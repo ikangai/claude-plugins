@@ -517,15 +517,18 @@ python3 .groupchat/chat.py send --from ada "@human <q>"  # worker→captain→ch
 python3 .groupchat/chat.py questions              # [operator] the chair's open escalations awaiting you
 python3 .groupchat/chat.py answer 42 "yes, ship"  # [operator] answer escalation #42 (wakes the lead)
 
-# Governance — a tracked, human-ratified constitution (votes are advisory)
+# Governance — a tracked constitution; the CORE picks the procedure (human-ratified or autonomous)
 python3 .groupchat/chat.py constitution init      # human: create CONSTITUTION.md (seeds C1-C4 + R1/R2)
+python3 .groupchat/chat.py constitution init --autonomous   # ...with the AUTONOMOUS procedure (motions enact themselves)
 python3 .groupchat/chat.py constitution           # show core + articles (alias: const; also: `check`)
 python3 .groupchat/chat.py review                 # repeal-first review: dead/rarely-cited rules (advisory)
 python3 .groupchat/chat.py motion --from ada --rule R2 --change "..." --because "<evidence>"
-python3 .groupchat/chat.py vote --session <id> M12 yea   # advisory; registered session only
-python3 .groupchat/chat.py model claude-opus-4-8 --from ada   # your model (annotates vote-tally diversity)
-python3 .groupchat/chat.py amendments             # open CONSTITUTIONAL motions + advisory tallies (+ model diversity)
-python3 .groupchat/chat.py ratify M12             # human: evidence dossier + a diff to commit (diff-only)
+python3 .groupchat/chat.py vote --session <id> M12 yea   # registered session only; binding in autonomous rooms
+python3 .groupchat/chat.py model claude-opus-4-8 --from ada   # your model (feeds the enactment diversity floor)
+python3 .groupchat/chat.py amendments             # open CONSTITUTIONAL motions + tallies (+ model diversity/windows)
+python3 .groupchat/chat.py enact                  # [autonomous] sweep: enact due motions, open/cancel windows
+python3 .groupchat/chat.py ratify M12             # human: evidence dossier + diff (autonomous: --confirm = early enact)
+AGORA_ENACT_DELAY=3600 AGORA_ENACT_DIVERSITY=2 python3 .groupchat/chat.py enact   # objection window / model floor
 
 # Parliamentary framing — sessions / agendas / decisions (advisory; binds nothing)
 python3 .groupchat/chat.py session open "rework the auth module" --from ada   # a deliberation window
@@ -643,13 +646,43 @@ Three layers:
   refactor**: `docs/plans/2026-06-24-networked-transport-seam.md` (the CAP/clock/identity
   walls). Design: `docs/plans/2026-06-24-heterogeneous-model-quorum-design.md`.
 
-**The vote never enacts a change** — a human ratifies from verifiable evidence; the
-tally is one weak input. Threat model (homogeneous-fleet capture, herd voting,
-unauthenticated `--from`) and full rationale:
-`docs/plans/2026-06-07-groupchat-constitution-design.md`. Tunables (all advisory):
-`GROUPCHAT_AMEND_{SUPERMAJORITY,QUORUM}`, `GROUPCHAT_REVIEW_LOW`. Tables added:
-`rule_cites`, `motions`, `votes` (all guarded; old dbs upgrade in place). **Drift-grep
-and diary-promotion are deferred to P2.5; binding auto-apply is the deferred P4.**
+- **P4 — autonomous enactment (the procedure is now the document's choice).** A room
+  whose constitution **CORE** carries `<!-- CONSTITUTION:PROCEDURE:autonomous -->`
+  (seeded by `constitution init --autonomous`, or a human's direct Core edit — the
+  only two paths, since motions can't touch Core and `_apply_amendment` writes only
+  inside the ARTICLES zone, **the parliament can never grant itself this**) enacts
+  its own passing motions: a motion holding the **bar** — supermajority of cast votes
+  (`GROUPCHAT_AMEND_SUPERMAJORITY`), quorum (`GROUPCHAT_AMEND_QUORUM`), and voters
+  from ≥ `AGORA_ENACT_DIVERSITY` (default 2) **distinct known models** (unknown
+  models count for quorum, never diversity — fail-safe: harder to enact) — is
+  **stamped** (`motions.passed_at`) and an **objection window** opens
+  (`AGORA_ENACT_DELAY`, default 1h; a tally that breaks clears the stamp and the
+  window restarts). Enactment is **lazy** — no daemon; the sweep
+  (`sweep_enactments`) runs on parliament verbs only (`vote` / `amendments` /
+  `motion` / `enact`), **never in a hook** (a git commit from a hook would violate
+  C2). On expiry the sweep re-runs the shared applicability guards
+  (`_motion_applicable` — the same TOCTOU/base-text/id checks `ratify` uses; an
+  inapplicable motion is marked `lapsed`, never misapplied), writes the amendment,
+  marks the motion `enacted`, posts a `system` notice, and **audit-commits**
+  `CONSTITUTION.md` (list-form git, best-effort — a failed commit is reported, the
+  file write stands). `ratify --confirm` in an autonomous room is an **early
+  enactment** (operator/lead-gated, same write + commit path); the dossier and the
+  law/decision wall (`op='decide'` can never be enacted) are unchanged. A room
+  *without* the marker — every pre-existing room — is **byte-identical to before**:
+  votes stay advisory, nothing stamps, `enact` explains and does nothing. Design:
+  `docs/plans/2026-08-10-autonomous-parliament-design.md`.
+
+**In a human-ratified room the vote never enacts a change** — a human ratifies from
+verifiable evidence; the tally is one weak input. In an **autonomous** room the
+tally + diversity + window DO enact — the capture defenses shift to the model-
+diversity floor, the objection window, the entrenched (still human-only) Core, and
+git-as-veto. Threat model (homogeneous-fleet capture, herd voting, unauthenticated
+`--from`) and full rationale:
+`docs/plans/2026-06-07-groupchat-constitution-design.md`. Tunables:
+`GROUPCHAT_AMEND_{SUPERMAJORITY,QUORUM}`, `GROUPCHAT_REVIEW_LOW`,
+`AGORA_ENACT_{DELAY,DIVERSITY}`. Tables added: `rule_cites`, `motions`, `votes`
+(all guarded; old dbs upgrade in place). **Drift-grep and diary-promotion are
+deferred to P2.5.**
 
 ### Testing the system
 
@@ -667,7 +700,9 @@ and the parliamentary framing (sessions/agendas/decisions) by `tests/sessions_te
 squad sharding (per-squad barriers) by `tests/squad_test.py`; the heterogeneous-model
 quorum (capture-visible advisory tally) by `tests/model_quorum_test.py`; the chair-topped
 council (per-squad leads) by `tests/council_test.py`; push-wake (native inbox nudges)
-by `tests/push_test.py` (it stands up a real Unix-socket listener).
+by `tests/push_test.py` (it stands up a real Unix-socket listener); autonomous
+enactment (P4: the bar, the objection window, TOCTOU-lapse, git audit, human-room
+byte-identity) by `tests/autonomy_test.py`.
 
 ```bash
 export GROUPCHAT_DIR=/tmp/gc_test          # isolate from the real room
