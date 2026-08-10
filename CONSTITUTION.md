@@ -17,12 +17,14 @@ Agents add intelligence, not concurrent edits. One writer per change.
 
 ### C4 — The amendment procedure
 <!-- CONSTITUTION:PROCEDURE:autonomous -->
-An Article changes when a motion holds, for the whole objection window:
-(a) a supermajority of the cast votes, (b) a quorum of registered
-voters, and (c) voters from at least two distinct models. The
-parliament then applies the diff and commits it. This Core section
-stays outside the procedure: it changes only by a direct human edit
-in git.
+<!-- CONSTITUTION:BAR: supermajority=0.66 quorum=2 diversity=2 window=3600 -->
+An Article changes when a motion holds, for the whole objection window
+(the BAR line above — the numbers ARE the law; no caller's environment
+can lower them): (a) a supermajority of the cast votes, (b) a quorum of
+present registered voters, and (c) voters from at least two distinct
+models. The parliament then applies the diff and commits it. This Core
+section stays outside the procedure: it changes only by a direct human
+edit in git.
 <!-- CONSTITUTION:CORE:END -->
 
 <!-- CONSTITUTION:ARTICLES:BEGIN -->
