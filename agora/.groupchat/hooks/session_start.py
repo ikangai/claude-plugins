@@ -154,6 +154,14 @@ def main():
         '(show the lead; `lead --claim` to take it, `lead <h>` to hand off)',
         f'Rename:  python3 "{path}" rename --from {handle} <new-name>   '
         '(change your handle; keeps your history)',
+        # The agora bus is bordered by THIS repo (one chat.db per git root); Claude
+        # Code's native cross-session messaging (SendMessage / ListAgents) is
+        # machine-wide and reaches sessions in OTHER repos, bypassing this ledger,
+        # the @mention/barrier, and the parliament. Keep coordination on the bus so
+        # it stays recorded, votable, and scoped — the native channel is off-record.
+        'Scope:   this chat is THIS repo (its own bus). Claude Code\'s native '
+        'SendMessage reaches other repos but is off-record here — keep coordination, '
+        'votes, and decisions on the bus so they\'re logged and in-scope.',
     ]
     if recent:
         lines += ["", "Recent chat:", chat.format_messages(recent, highlight=handle)]
