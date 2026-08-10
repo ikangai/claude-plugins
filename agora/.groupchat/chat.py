@@ -30,6 +30,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -312,6 +313,12 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # $AGORA_MODEL / the `model` verb / `bootstrap --model` (a bridge adapter MAY set it
     # for Codex/opencode; none does yet, so a bridged voter is unknown-model).
     _add_column_if_missing(conn, "agents", "model", "TEXT")
+    # The session's NATIVE inbox socket (Claude Code >= 2.1.224 cross-session
+    # messaging; captured from $CLAUDE_CODE_MESSAGING_SOCKET at register/refresh).
+    # NULL = this host can't take a push-wake (non-Claude host, older version,
+    # feature off). Strictly best-effort transport sugar — the bus row + cursor
+    # remain the delivery of record (see _push_nudges).
+    _add_column_if_missing(conn, "agents", "inbox", "TEXT")
     conn.execute(
         "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -509,6 +516,12 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
         "SELECT handle FROM agents WHERE session_id = ?", (session_id,)
     ).fetchone()
     ts = now_iso()
+    # The native inbox socket, exported by Claude Code to hooks/Bash as this
+    # session's OWN socket (never inherited from a parent). Refreshed on every
+    # register so a resumed session (new pid → new socket path) stays reachable;
+    # an absent var never erases a stored value (a foreign-process `register`
+    # must not blind an otherwise reachable agent).
+    inbox = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET") or None
     if row:
         sets = ["last_seen = ?"]
         params: list = [ts]
@@ -516,6 +529,8 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
             sets.append("cwd = ?"); params.append(cwd)
         if pid is not None:
             sets.append("pid = ?"); params.append(pid)
+        if inbox is not None:
+            sets.append("inbox = ?"); params.append(inbox)
         if status is not None:
             sets.append("status = ?"); params.append(status)
         if not parks:
@@ -569,11 +584,12 @@ def register(conn: sqlite3.Connection, session_id: str, cwd: str | None = None,
             conn.execute(
                 "INSERT INTO agents(session_id, handle, cwd, pid, status, "
                 "first_seen, last_seen, last_read_id, spawn_depth, spawned_by, parks, "
-                "squad, model) "
-                "VALUES (?,?,?,?,?,?,?, (SELECT COALESCE(MAX(id),0) FROM messages), ?, ?, ?, ?, ?)",
+                "squad, model, inbox) "
+                "VALUES (?,?,?,?,?,?,?, (SELECT COALESCE(MAX(id),0) FROM messages), ?, ?, ?, ?, ?, ?)",
                 (session_id, h, cwd, pid, status, ts, ts,
                  current_spawn_depth(), _env("SPAWNED_BY") or None,
-                 1 if parks else 0, _norm_squad(_env("SQUAD")), _norm_model(_env("MODEL"))),
+                 1 if parks else 0, _norm_squad(_env("SQUAD")), _norm_model(_env("MODEL")),
+                 inbox),
             )
             conn.commit()
             _clear_stale_team_size(conn, session_id)
@@ -1989,6 +2005,86 @@ def _expand_broadcast(conn, sender: str, mentions: list[str]) -> list[str]:
     return sorted(set(real) | others)
 
 
+# --------------------------------------------------------------------------- #
+# Push-wake — best-effort nudge over the native cross-session inbox socket
+# --------------------------------------------------------------------------- #
+# Claude Code >= 2.1.224 binds a Unix inbox socket per session (exported as
+# $CLAUDE_CODE_MESSAGING_SOCKET; captured into agents.inbox at register). A JSON
+# line written to it is delivered to that session between tool calls — or, when
+# the session is IDLE, starts a new turn. That closes the attended-session gap:
+# a human-launched session never parks (v0.15.3), so before this it learned of an
+# @mention only at the human's next prompt; now the mention wakes it immediately.
+#
+# Design invariants:
+#   * ADVISORY ONLY. The wire format is Claude Code internals (peerProtocol 1,
+#     undocumented), the feature is absent on non-Claude hosts / old versions /
+#     Windows / telemetry-opt-out setups, and inbound controls may hold or drop a
+#     message. So every push is fail-open and NOTHING gates on it — the bus row +
+#     read cursor remain the delivery of record; the park still wakes on the DB.
+#   * The nudge carries an instruction to READ THE BUS, not the message body —
+#     whether a push-started turn fires UserPromptSubmit (cursor advance) is host
+#     behavior we don't control; `read --from <h>` self-heals the cursor either
+#     way and avoids double-surfacing the same text.
+#   * The payload pins the RECIPIENT's session_id: the receiving side drops a
+#     mismatch, so a recycled socket path (pid reuse by an unrelated session)
+#     fails closed instead of nudging a stranger.
+#   * The message id is in the text so the receiver's identical-repeat throttle
+#     never swallows a second, distinct nudge.
+# Disable with AGORA_PUSH=0 (legacy GROUPCHAT_PUSH honored via _env).
+PUSH_TIMEOUT_SECONDS = 0.5
+
+
+def _push_enabled() -> bool:
+    v = (_env("PUSH") or "").strip().lower()
+    return v not in ("0", "off", "never", "false")
+
+
+def _push_wake(inbox: str, target_session: str | None, text: str) -> bool:
+    """Write one wake message to a teammate's native inbox socket. Returns False on
+    any failure (dead socket, timeout, feature off at the receiver) — never raises."""
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.settimeout(PUSH_TIMEOUT_SECONDS)
+            s.connect(inbox)
+            payload: dict = {"type": "user",
+                             "message": {"role": "user", "content": text}}
+            if target_session:
+                payload["session_id"] = target_session
+            s.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+        finally:
+            s.close()
+        return True
+    except Exception:
+        return False
+
+
+def _push_nudges(conn, sender: str, mentions: list[str], msg_id: int) -> None:
+    """Nudge each @mentioned teammate that has a known inbox socket. Skips the
+    sender itself, reserved tokens, unknown/inactive agents, and socketless hosts
+    (bridge fleet, old versions) — for those the existing cursor/park delivery is
+    unchanged. Per-recipient fail-open: one dead socket never blocks the next."""
+    if not mentions or not _push_enabled():
+        return
+    me = os.path.abspath(__file__)
+    sender_l = (sender or "").strip().lower()
+    for h in mentions:
+        try:
+            if h == sender_l or h in RESERVED_HANDLES:
+                continue
+            a = agent_by_handle(conn, h)
+            if not a or not a["inbox"] or not _is_active(a["last_seen"]):
+                continue
+            _push_wake(
+                a["inbox"], a["session_id"],
+                f"[agora] Bus message #{msg_id} from {sender_l} mentions you (@{h}). "
+                f'Read it — and reply on the bus, not here: '
+                f'python3 "{me}" read --from {h}',
+            )
+        except Exception:
+            continue
+
+
 def send(conn, sender: str, body: str, session_id: str | None = None,
          kind: str = "chat") -> int:
     # Hub-and-spoke routing: a worker's @human is funnelled to the lead before the
@@ -2020,6 +2116,12 @@ def send(conn, sender: str, body: str, session_id: str | None = None,
                 (now_iso(), rid, sender, msg_id),
             )
     conn.commit()
+    # Push-wake AFTER the commit so a nudged recipient's `read` already sees the
+    # row. Best-effort and advisory (see _push_nudges); a failure changes nothing.
+    try:
+        _push_nudges(conn, sender, mentions, msg_id)
+    except Exception:
+        pass
     return msg_id
 
 
