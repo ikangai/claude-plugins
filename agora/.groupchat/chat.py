@@ -3743,10 +3743,148 @@ def _rule_cite_sender_sets(conn, days: int = 0) -> dict:
     return by
 
 
+# --------------------------------------------------------------------------- #
+# P2.5 — drift-grep + diary-promotion (heuristic review inputs; advisory only)
+# --------------------------------------------------------------------------- #
+# Two extra, advisory review outputs (they change nothing, like the rest of
+# `review`). DRIFT-GREP catches an Article that references a repo path/symbol that
+# no longer exists — a rule that has silently drifted out of sync with the code.
+# DIARY-PROMOTION surfaces recurring `.dev-diary/` lessons as HYPOTHESIS motion
+# candidates — leads for a human, NEVER proof (the diary is self-reported and, the
+# moment it feeds the law, a lobbying instrument). Both are conservative: they
+# under-flag rather than cry wolf, and every failure is swallowed so a review can't
+# break on a bad grep / missing diary. Design: the P2.5 split in
+# docs/plans/2026-06-07-groupchat-constitution-design.md (§3 outputs 2 & 4).
+_CODE_SPAN_INNER = re.compile(r"`([^`\n]{2,80})`")
+_BARE_PATH = re.compile(r"(?<![`\w])((?:\.{0,2}/)?[\w][\w./*-]*/[\w./*-]+)")
+
+
+def _looks_path(tok: str) -> bool:
+    """A reference that names a filesystem path/glob (checkable by existence)."""
+    return ("/" in tok) or bool(re.search(r"\.[A-Za-z0-9]{1,5}$", tok)) \
+        or ("*" in tok and "." in tok)
+
+
+def _looks_symbol(tok: str) -> bool:
+    """A code identifier (dotted allowed) worth a grep — not a plain English/command
+    word. Requires a code marker (`_`, `.`, or camelCase) so ``task``/``read`` (bare
+    command words in the seeded Articles) are never flagged."""
+    if not re.fullmatch(r"[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*", tok) or len(tok) < 4:
+        return False
+    return ("_" in tok) or ("." in tok) or bool(re.search(r"[a-z][A-Z]", tok))
+
+
+def _path_present(repo: str, tok: str) -> bool:
+    import glob as _glob
+    t = tok.strip().lstrip("./").rstrip("/")
+    if not t or ".." in t:
+        return True  # empty / traversal -> never flag
+    full = os.path.join(repo, t)
+    return os.path.exists(full) or bool(_glob.glob(full))
+
+
+def _symbol_present(repo: str, sym: str) -> bool:
+    """True if ``sym`` appears anywhere in the tracked repo EXCEPT CONSTITUTION.md
+    (a rule naming its own now-deleted symbol must still flag). Fail-safe: any grep
+    problem (not a git repo, timeout) reads as present, so we never invent drift."""
+    try:
+        r = subprocess.run(["git", "-C", repo, "grep", "-lI", "--", sym],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode not in (0, 1):
+            return True
+        files = [f for f in r.stdout.splitlines()
+                 if os.path.basename(f) != "CONSTITUTION.md"]
+        return len(files) > 0
+    except Exception:
+        return True
+
+
+def _article_drift(text: str, live_ids, repo: str) -> list:
+    """[(rule_id, title, [stale_refs])] for live Articles that reference a repo
+    path/symbol no longer present. Conservative; fail-open per-article."""
+    out = []
+    for rid in live_ids:
+        try:
+            blk = _article_block(text, rid)
+            if not blk:
+                continue
+            body = blk[2]
+            # Candidate references: backtick code spans + bare slash-paths.
+            cands = set(m.group(1).strip() for m in _CODE_SPAN_INNER.finditer(body))
+            cands |= set(m.group(1).strip() for m in _BARE_PATH.finditer(body))
+            stale = []
+            for tok in sorted(cands):
+                tok = tok.strip().strip("`\"'()[],")
+                if not tok or " " in tok or "<" in tok or ">" in tok:
+                    continue  # skip prose, placeholders, multi-word command spans
+                if _looks_path(tok):
+                    if not _path_present(repo, tok):
+                        stale.append(tok)
+                elif _looks_symbol(tok):
+                    if not _symbol_present(repo, tok):
+                        stale.append(tok)
+            if stale:
+                title = next((a["title"] for a in parse_constitution(text)["live"]
+                              if a["id"] == rid), rid)
+                out.append((rid, title, stale))
+        except Exception:
+            continue
+    return out
+
+
+def _diary_dir() -> str | None:
+    for base in (repo_root(), os.getcwd()):
+        d = os.path.join(base, ".dev-diary")
+        if os.path.isdir(d):
+            return d
+    return None
+
+
+def _diary_lessons(conn, diary_dir: str | None) -> list:
+    """[(source_file, lesson_text, [evidence_ids], corroborated)] harvested from
+    `.dev-diary/` prose. A LESSON: line is the preferred structured form; any line
+    carrying an `[evidence: #id]` / `#id` token is the fallback. `corroborated` = at
+    least one cited id is a real bus message (the minimum bar before a motion)."""
+    out = []
+    if not diary_dir or not os.path.isdir(diary_dir):
+        return out
+    seen = set()
+    try:
+        files = sorted(fn for fn in os.listdir(diary_dir) if fn.endswith(".md"))
+    except Exception:
+        return out
+    for fn in files:
+        try:
+            body = open(os.path.join(diary_dir, fn)).read()
+        except Exception:
+            continue
+        for line in body.splitlines():
+            s = line.strip().lstrip("-*# ").strip()
+            if not s:
+                continue
+            is_lesson = s.upper().startswith("LESSON:")
+            ids = [int(x) for x in re.findall(r"#(\d+)", s)]
+            has_ev = ("[evidence:" in s.lower()) or (is_lesson and ids)
+            if not (is_lesson or has_ev):
+                continue
+            key = (fn, s[:120])
+            if key in seen:
+                continue
+            seen.add(key)
+            corrob = any(
+                conn.execute("SELECT 1 FROM messages WHERE id=?", (i,)).fetchone()
+                for i in ids)
+            text = re.sub(r"(?i)^lesson:\s*", "", s).strip()
+            out.append((fn, text[:160], ids, bool(corrob)))
+    return out
+
+
 def cmd_review(args):
     """Repeal-first, ADVISORY review: rank live Articles by distinct-sender cites,
-    flag dead/rarely-cited rules for repeal, and surface cites for unknown/repealed
-    ids. Changes nothing. (Drift-grep + diary-promotion are deferred to P2.5.)"""
+    flag dead/rarely-cited rules for repeal, surface cites for unknown/repealed ids,
+    then two P2.5 heuristics — drift-grep (Articles referencing vanished repo
+    paths/symbols) and diary-promotion (recurring `.dev-diary/` lessons as HYPOTHESIS
+    motion candidates). Advisory: changes nothing."""
     path = constitution_path()
     if not os.path.exists(path):
         print(f"no constitution yet at {path} — nothing to review.")
@@ -3793,7 +3931,39 @@ def cmd_review(args):
         for rid in unknown:
             print(f"  {rid}   ({len(sets[rid])} cites)")
 
-    print("\nDrift-flag + diary-promotion checks: deferred to P2.5.")
+    # P2.5 — drift-grep: an Article naming a repo path/symbol that's gone. Fail-open
+    # so a grep problem never breaks the repeal report above.
+    try:
+        text = open(path).read()
+        drift = _article_drift(text, list(live), repo_root())
+        print("\nDrift flags (Articles referencing paths/symbols not in the repo):")
+        if drift:
+            for rid, t, stale in drift:
+                print(f"  {rid} — {t}   → stale: " + ", ".join(f"`{s}`" for s in stale))
+        else:
+            print("  (none)")
+    except Exception:
+        pass
+
+    # P2.5 — diary-promotion: recurring lessons as HYPOTHESIS candidates. The diary is
+    # self-reported (and, once it feeds the law, a lobbying instrument), so these are
+    # LEADS, never proof: each still needs a corroborating bus cite, a vote, and a
+    # human ratify before it is law. Read the memoir for leads; convict on the evidence.
+    try:
+        lessons = _diary_lessons(conn, _diary_dir())
+        if lessons:
+            print("\nPromotion candidates — HYPOTHESIS (diary, unverified); a lead, "
+                  "not proof:")
+            for fn, txt, ids, corrob in lessons:
+                tag = (f"corroborated by bus msg {', '.join('#'+str(i) for i in ids)}"
+                       if corrob else
+                       ("uncorroborated — cite it on the bus before a motion"
+                        if not ids else
+                        f"cited {', '.join('#'+str(i) for i in ids)} — not on this bus"))
+                print(f"  [{fn}] {txt}\n      → {tag}")
+            print("  (advisory — motion + vote + human ratify still required)")
+    except Exception:
+        pass
     return 0
 
 

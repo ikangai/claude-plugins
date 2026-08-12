@@ -330,6 +330,12 @@ the review) is a later concern, not a P2 dependency.
 > (output 1) is the fully-specified, genuinely valuable core; drift-grep (2) and
 > diary-promotion (4) are heuristic and may be split into a P2.5 with their own
 > acceptance criteria. **[rev2]**
+>
+> **Status (v0.20.0, 2026-08-12): P2.5 landed.** `review` now emits both — drift-grep
+> (Article → vanished repo path/symbol; existence + `git grep`, conservative, fail-safe)
+> and diary-promotion (`.dev-diary/` `LESSON:`/`[evidence:#id]` lines as `HYPOTHESIS`
+> candidates, corroboration-checked against the bus, never auto-promoted). Both are
+> advisory and fail-open; covered by `tests/review_p25_test.py`.
 
 ### 4. The parliament — motion → vote → ratify (Phase 3, **advisory**)
 

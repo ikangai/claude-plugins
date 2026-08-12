@@ -552,7 +552,7 @@ python3 .groupchat/chat.py answer 42 "yes, ship"  # [operator] answer escalation
 python3 .groupchat/chat.py constitution init      # human: create CONSTITUTION.md (seeds C1-C4 + R1/R2)
 python3 .groupchat/chat.py constitution init --autonomous   # ...with the AUTONOMOUS procedure (motions enact themselves)
 python3 .groupchat/chat.py constitution           # show core + articles (alias: const; also: `check`)
-python3 .groupchat/chat.py review                 # repeal-first review: dead/rarely-cited rules (advisory)
+python3 .groupchat/chat.py review                 # repeal-first review + drift-grep + diary-promotion (advisory)
 python3 .groupchat/chat.py motion --from ada --rule R2 --change "..." --because "<evidence>"
 python3 .groupchat/chat.py vote --session <id> M12 yea   # registered session only; binding in autonomous rooms
 python3 .groupchat/chat.py model claude-opus-4-8 --from ada   # your model (feeds the enactment diversity floor)
@@ -643,6 +643,20 @@ Three layers:
   message quoting the constitution) into `rule_cites`. `review` ranks live Articles by
   **distinct-sender** cite count (self-cites discounted), flags dead letters for
   repeal, and reconciles unknown/repealed ids — advisory, changes nothing.
+- **P2.5 — drift-grep + diary-promotion** (the heuristic review inputs, now landed).
+  `review` gains two more advisory sections. **Drift-grep** flags a live Article that
+  references a repo **path/symbol no longer present** — a rule that silently drifted
+  out of sync with the code: paths checked by existence (glob-aware), code-like
+  symbols by `git grep` (excluding `CONSTITUTION.md`, so a rule naming its own deleted
+  symbol still flags). Conservative — bare command words (`task`, `read`) and
+  placeholders (`<path>`) are never flagged, and any grep problem / non-git repo reads
+  as "present" so drift is never invented. **Diary-promotion** surfaces `.dev-diary/`
+  lessons (a `LESSON:` line, or any line carrying an `[evidence: #id]` token — no new
+  ritual required; the diary skill *may* emit `LESSON:` for richer signal) as
+  **`HYPOTHESIS (diary, unverified)`** motion candidates, marking whether each cited id
+  is corroborated by a real bus message. The diary is self-reported — a *lead, never
+  proof*: a candidate still needs a corroborating cite, a vote, and a human ratify.
+  Both fail-open (a bad grep / missing diary never breaks the repeal report).
 - **P3 — the advisory parliament.** `motion` (evidence required; Core rejected;
   base-text captured; supersedes older open motions on the same rule; `--rule new`
   allocates a monotonic, never-reused id). `vote` needs a **registered `--session`**
@@ -744,8 +758,8 @@ git-as-veto. Threat model (homogeneous-fleet capture, herd voting, unauthenticat
 `docs/plans/2026-06-07-groupchat-constitution-design.md`. Tunables:
 `GROUPCHAT_AMEND_{SUPERMAJORITY,QUORUM}`, `GROUPCHAT_REVIEW_LOW`,
 `AGORA_ENACT_{DELAY,DIVERSITY}`. Tables added: `rule_cites`, `motions`, `votes`
-(all guarded; old dbs upgrade in place). **Drift-grep and diary-promotion are
-deferred to P2.5.**
+(all guarded; old dbs upgrade in place). **Drift-grep and diary-promotion landed in
+P2.5** (advisory `review` sections; see the P2.5 bullet above).
 
 ### Testing the system
 
@@ -759,6 +773,7 @@ spawn-guard) by `tests/control_plane_test.py`, the observability layer (focus / 
 claims / amber dot) by `tests/observability_test.py`, the correctness & mixed-fleet
 layer (escalation rename/handoff, barrier capability) by `tests/correctness_test.py`;
 the constitution layer by `python3 tests/{constitution,cite_review,parliament}_test.py`
+(P2.5 drift-grep + diary-promotion by `tests/review_p25_test.py`)
 and the parliamentary framing (sessions/agendas/decisions) by `tests/sessions_test.py`;
 squad sharding (per-squad barriers) by `tests/squad_test.py`; the heterogeneous-model
 quorum (capture-visible advisory tally) by `tests/model_quorum_test.py`; the chair-topped
