@@ -154,9 +154,23 @@ Agora rides this as a *latency* channel, never a correctness one:
   Code *internals* (`peerProtocol: 1`, undocumented) — nothing may ever gate on a push.
   Disable with `AGORA_PUSH=0`. Tests isolate via `env_for`'s
   `CLAUDE_CODE_MESSAGING_SOCKET` scrub (else a suite run inside a live session would
-  nudge the developer's own conversation). Design + blindspot analysis:
-  `docs/plans/2026-08-09-native-cross-session-messaging-blindspot.md` (P2–P4 deferred:
-  roster/native-name bridge, park retirement, headless spawn).
+  nudge the developer's own conversation).
+- **Roster/identity bridge (P2).** An agora agent is also a native Claude Code session
+  under a *different* name (agora `ada` vs native `agora-bb`). `bootstrap` now spawns
+  `claude -n <handle>` so `/list-agents` and `who` agree going forward.
+  `_native_sessions()` reads Claude Code's own session registry
+  (`$CLAUDE_CONFIG_DIR/sessions/*.json`, best-effort/fail-open — dormant on non-Claude
+  hosts), and `who` surfaces the native alias `⇄<name>` on a mismatch, a `⌁`
+  push-reachable marker (has an inbox socket), and a `push-reachable: K/N` tally. The
+  registry format is Claude Code internals — advisory annotation only, never a
+  dependency. Covered by `tests/native_bridge_test.py`.
+- **Confirmed (2026-08-12):** a push-wake-started turn *does* fire `UserPromptSubmit`
+  (binary-traced: a peer message becomes a queued user prompt; the prompt path always
+  runs the hooks, source is metadata) — so the cursor self-heals and the nudge's
+  explicit `read` is belt-and-suspenders. Design + blindspot analysis:
+  `docs/plans/2026-08-09-native-cross-session-messaging-blindspot.md` (P3 park
+  retirement / P4 headless spawn still deferred; P3 must spawn workers with
+  `crossSessionInbound: accept` — see the doc).
 
 ### The team barrier (parallel `/goal` coordination)
 
@@ -732,7 +746,9 @@ and the parliamentary framing (sessions/agendas/decisions) by `tests/sessions_te
 squad sharding (per-squad barriers) by `tests/squad_test.py`; the heterogeneous-model
 quorum (capture-visible advisory tally) by `tests/model_quorum_test.py`; the chair-topped
 council (per-squad leads) by `tests/council_test.py`; push-wake (native inbox nudges)
-by `tests/push_test.py` (it stands up a real Unix-socket listener); autonomous
+by `tests/push_test.py` (it stands up a real Unix-socket listener); the roster/identity
+bridge (P2: `bootstrap -n`, native alias in `who`, push-reachable tally) by
+`tests/native_bridge_test.py`; autonomous
 enactment (P4: the bar, the objection window, TOCTOU-lapse, git audit, human-room
 byte-identity) by `tests/autonomy_test.py`; the seat (P5: document-sovereign BAR,
 presence-weighted tally, frozen voter model, the enact lock, the objection

@@ -1,9 +1,36 @@
 # Blindspot pass: Claude Code native cross-session messaging (and what agora should do about it)
 
-**Date:** 2026-08-09 · **Status:** analysis + proposal; **P1 implemented same day**
-(`agents.inbox` capture, `_push_wake`/`_push_nudges` in `send()`, `AGORA_PUSH=0`
-opt-out, `tests/push_test.py`, doctor schema, `env_for` socket scrub — verified
-end-to-end against a live Claude Code 2.1.226 receiver). P2–P4 still open.
+**Date:** 2026-08-09 · **Status:** analysis + proposal.
+- **P1 implemented** (`agents.inbox` capture, `_push_wake`/`_push_nudges` in `send()`,
+  `AGORA_PUSH=0` opt-out, `tests/push_test.py`, `env_for` socket scrub — verified
+  end-to-end against a live Claude Code 2.1.226 receiver).
+- **P2 implemented (2026-08-12):** the roster/identity bridge — `bootstrap` spawns
+  `claude -n <handle>` so `/list-agents` and `who` agree; `_native_sessions()` reads
+  Claude Code's session registry (best-effort) and `who` surfaces the native alias
+  `⇄<name>` on a mismatch, a `⌁` push-reachable marker, and a `push-reachable: K/N`
+  tally. The briefing's two-channel caution shipped earlier as v0.17.1.
+  `tests/native_bridge_test.py`.
+- **The two P3-gating test gaps, resolved (2026-08-12):**
+  1. *Does a push-wake-started turn fire UserPromptSubmit (cursor advance)?* **Yes.**
+     Forensic trace of the 2.1.227 binary: a peer message routes `peer → prompt →
+     "Routed user message to queue"`, and the prompt path unconditionally calls
+     `executeUserPromptSubmitHooks(…, {promptSource})` — the source is passed as
+     *metadata*, never gates whether hooks run (values seen: `typed`/`sdk`/`system`).
+     The docs agree ("counts toward usage like a prompt you type"). So agora's
+     `user_prompt_submit.py` fires on a nudge-started turn and the cursor self-heals;
+     the nudge's explicit `read` instruction is belt-and-suspenders, not load-bearing.
+     **No code change** — the conservative P1 design was correct.
+  2. *Does a parked agent drop a held native message at the 5-min dialog expiry?*
+     **Not a correctness risk for P1/P2; it is a P3 prerequisite.** A parked agent is
+     blocked in a Stop-hook sleep (not idle), so a peer message is queued (default
+     prompting-mode bootstrap workers) or held-then-expired (only a `bypassPermissions`
+     receiver). Either way it is harmless *today* because a parked agent's wake path is
+     the **DB tick**, not native delivery — the nudge is redundant noise there. It
+     becomes load-bearing only under **P3 park-retirement**, which must therefore spawn
+     workers with `crossSessionInbound: accept` (or keep the DB poll for `bypass`
+     fleets). Recorded here so P3 starts from the constraint, not a surprise.
+- **P3 (park retirement) / P4 (headless spawn) still open** — see the section below.
+
 **Trigger:** operator asked for an unknown-unknowns pass and to evaluate
 https://code.claude.com/docs/en/cross-session-messaging for agora.
 
