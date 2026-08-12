@@ -155,13 +155,27 @@ def main() -> int:
             env_for(root, AGORA_PUSH="0"))
         c.check("AGORA_PUSH=0 disables nudging", _take_payload(srv) is None)
 
-        # An INACTIVE agent (aged out of the window) is not nudged.
+        # P3 reachability: an agent aged out of the active window is STILL nudged
+        # while its inbox socket is bound — a retired-idle worker's live socket is a
+        # truer liveness signal than its stale last_seen.
         conn = db(root)
         conn.execute("UPDATE agents SET last_seen='2000-01-01T00:00:00Z' "
                      "WHERE session_id='s-bob'")
         conn.commit(); conn.close()
-        cli(["send", "--from", "ada", "@bob are you there"], env)
-        c.check("inactive agent is not nudged", _take_payload(srv) is None)
+        cli(["send", "--from", "ada", "@bob still reachable while idle"], env)
+        c.check("retired-idle agent (stale last_seen, live socket) is still nudged",
+                _take_payload(srv) is not None)
+
+        # ...but once the socket is gone (process exited), an inactive agent is not
+        # nudged — nothing to reach, and the stale window no longer vouches for it.
+        conn = db(root)
+        conn.execute("UPDATE agents SET last_seen='2000-01-01T00:00:00Z', "
+                     "inbox='/tmp/cc-socks/p3-gone-nonexistent.sock' "
+                     "WHERE session_id='s-bob'")
+        conn.commit(); conn.close()
+        cli(["send", "--from", "ada", "@bob anyone home"], env)
+        c.check("inactive agent with a vanished socket is not nudged",
+                _take_payload(srv) is None)
         cli(["register", "--session", "s-bob"],
             env_for(root, CLAUDE_CODE_MESSAGING_SOCKET=bob_sock))  # revive
 

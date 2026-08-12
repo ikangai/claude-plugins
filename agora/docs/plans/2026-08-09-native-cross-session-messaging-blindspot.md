@@ -171,25 +171,46 @@ of one poll tick), the socket does natively: an idle session starts a new turn.
 - Briefing gains one line: "this room's bus is the coordination channel; native
   SendMessage bypasses the ledger — mirror anything decided there into the bus."
 
-**P3 — park retirement on capable hosts (the architectural payoff):**
+**P3 — park retirement (IMPLEMENTED 2026-08-12, v0.19.0).** A spawned worker parked
+(a *blocking* sleep in the Stop hook) only because, pre-push-wake, an idle session
+had no way to be reached for a late @mention. Now that it binds an inbox socket it
+**retires** instead: it marks done and returns, going idle, and wakes on a teammate's
+@mention via the P1 nudge — no frozen session, instant wake, no re-park turns, no 2h
+drop. The retirement is *exactly* the attended path (return to idle), now safe for a
+spawned worker because it has a socket. Two agents still take the blocking park,
+because the loop still earns its keep:
+- an agent **awaiting the operator** — the loop is what enforces the **2h escalation
+  ceiling**; an idle agent can't self-enforce it, so a never-answered @human would
+  otherwise pin the team forever. (This was the subtle correctness catch — retiring an
+  awaiting agent silently drops the ceiling fail-safe.)
+- a **non-socketed** worker (bridge host / feature off) — blocking is its only way to
+  stay reachable. `AGORA_PARK=1` still forces the old blocking park for anyone.
 
-- Stop hook: if this agent's own socket exists (feature on) **and** every teammate
-  that might need to reach it can push (all-active-have-inbox), then mark done and
-  **return without parking** — the session goes idle but stays reachable; a later
-  @mention wakes it via P1's nudge. Teardown broadcast ("barrier complete") can
-  itself be a push.
-- Keep the park verbatim when: any teammate lacks `inbox` (Codex/opencode/old
-  Claude), the feature is off locally, or `AGORA_PARK=1` forces it. Mixed fleets
-  degrade per-host exactly like the existing `parks` capability bit.
-- Wrinkles to resolve before building: spawned-worker permission class
-  (a `bypassPermissions` receiver **holds** unclassified socket messages → 5-min
-  dialog expiry → drop; bootstrap may need `--settings '{"crossSessionInbound":"accept"}'`
-  for unattended workers); the per-sender rate limiter; the 50-message accepted cap;
-  whether a nudge-started turn fires UserPromptSubmit (test!).
+The reachability wrinkle, solved: a retired agent's `last_seen` ages out of the 15-min
+window, so `_push_nudges` would stop nudging it. Fixed by making the nudge gate
+`active OR os.path.exists(inbox)` — the **live socket** is a truer liveness signal than
+the DB heuristic, and a stale socket only makes the push fail-open. No native-registry
+coupling in `send()`.
 
-**P4 — spawn modernization (exploratory):** `bootstrap --method headless` spawning
-long-running `claude -p` workers (they bind sockets, appear in `/list-agents`, take
-pushes with `crossSessionInbound: accept`) instead of osascript Terminal windows.
+**P4 — spawn hardening (the shippable half) + headless verdict (2026-08-12).**
+- *Shipped:* `bootstrap` launches each worker with `--settings
+  '{"crossSessionInbound":"accept"}'` (gated on push being enabled), so a peer nudge is
+  **delivered, not held** even if the worker runs `bypassPermissions` — closing the
+  gap-2 hold-and-expire hole. `--settings` layers one key over the worker's
+  project/plugin settings (hooks untouched — the documented mechanism for unattended
+  workers).
+- *Deferred with evidence:* the original "`bootstrap --method headless` = long-running
+  `claude -p` workers" is **not cleanly feasible** with current Claude Code. A plain
+  `claude -p "<task>"` runs one turn and **exits** (socket gone → unreachable, which
+  breaks the whole push-wake reachability P3 relies on). The *only* long-running
+  headless mode is `-p --input-format stream-json --output-format stream-json`, which
+  needs a **persistent orchestrator** holding the child's stdin/stdout pipes — the
+  Agent-SDK model, the opposite of agora's decentralized, fire-and-forget, bus-
+  coordinated spawn (there is no central orchestrator process). `keepAlive` in the
+  binary is HTTP connection-pooling, not session persistence; there is no
+  detached-idle launch flag. So headless spawn waits for either a Claude Code
+  "persistent headless session" primitive or an agora orchestrator daemon — a
+  materially different design, correctly out of scope here.
 
 ### What NOT to do
 

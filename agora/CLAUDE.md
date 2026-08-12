@@ -164,13 +164,25 @@ Agora rides this as a *latency* channel, never a correctness one:
   push-reachable marker (has an inbox socket), and a `push-reachable: K/N` tally. The
   registry format is Claude Code internals — advisory annotation only, never a
   dependency. Covered by `tests/native_bridge_test.py`.
-- **Confirmed (2026-08-12):** a push-wake-started turn *does* fire `UserPromptSubmit`
-  (binary-traced: a peer message becomes a queued user prompt; the prompt path always
-  runs the hooks, source is metadata) — so the cursor self-heals and the nudge's
-  explicit `read` is belt-and-suspenders. Design + blindspot analysis:
-  `docs/plans/2026-08-09-native-cross-session-messaging-blindspot.md` (P3 park
-  retirement / P4 headless spawn still deferred; P3 must spawn workers with
-  `crossSessionInbound: accept` — see the doc).
+- **Park retirement (P3).** A spawned worker parked (a *blocking* sleep in the Stop
+  hook) only because, pre-push-wake, an idle session couldn't be reached for a late
+  @mention. Now that it binds an inbox socket it **retires** instead — marks done and
+  returns to idle, waking on a teammate's @mention via the nudge (instant, no re-park
+  turns, no 2h drop). Exactly the attended path, now safe for a spawned worker.
+  **Still parks (the blocking loop still earns its keep):** an agent *awaiting the
+  operator* (the loop enforces the 2h escalation ceiling an idle agent can't
+  self-enforce), and a *non-socketed* worker (bridge host / `AGORA_PUSH=0` — blocking
+  is its only reachability). `AGORA_PARK=1` forces the old blocking park. The
+  reachability wrinkle (a retired agent's `last_seen` ages out) is solved by nudging on
+  `active OR os.path.exists(inbox)` — the live socket is the truer liveness signal.
+- **Spawn hardening + headless verdict (P4).** `bootstrap` launches workers with
+  `--settings '{"crossSessionInbound":"accept"}'` (gated on push enabled) so a nudge is
+  *delivered, not held* under `bypassPermissions`. Full headless `-p` workers are
+  **deferred with evidence**: a plain `claude -p` runs one turn and exits (unreachable),
+  and the only long-running headless mode (`-p --input-format stream-json`) needs a
+  persistent orchestrator holding the pipes — the Agent-SDK model, contrary to agora's
+  decentralized fire-and-forget spawn. Design + blindspot analysis:
+  `docs/plans/2026-08-09-native-cross-session-messaging-blindspot.md`.
 
 ### The team barrier (parallel `/goal` coordination)
 
@@ -241,7 +253,12 @@ blocks). So `stop.py` keeps a finished agent alive until the *whole team* is don
   (a lone lead parking to wait for the operator's answer to its own `@human`, on the
   very terminal that answer would be typed into). The DB `status` still gates the
   barrier, so a spawned fleet with a human-driver lead coordinates correctly. Override
-  with `AGORA_PARK` (`1` = always park, `0` = never park).
+  with `AGORA_PARK` (`1` = always park, `0` = never park). **Refinement (P3, push-wake):**
+  a spawned worker that is itself *push-reachable* (its inbox socket is bound) now
+  **retires** to idle instead of blocking-parking — a teammate's @mention wakes it via
+  the socket, so the freeze is unnecessary. Only an *awaiting-operator* agent (which
+  needs the park's 2h ceiling) or a *non-socketed* worker still takes the blocking park.
+  See the push-wake section.
 - **Ceiling** (`MAX_PARK_SECONDS`, default **2h**; env `GROUPCHAT_MAX_PARK`): a
   continuously-parked agent is released regardless, so a mis-set `GROUPCHAT_TEAM_SIZE`
   can't hang everyone. Raise it for long-running goals so a finished agent isn't
@@ -748,7 +765,9 @@ quorum (capture-visible advisory tally) by `tests/model_quorum_test.py`; the cha
 council (per-squad leads) by `tests/council_test.py`; push-wake (native inbox nudges)
 by `tests/push_test.py` (it stands up a real Unix-socket listener); the roster/identity
 bridge (P2: `bootstrap -n`, native alias in `who`, push-reachable tally) by
-`tests/native_bridge_test.py`; autonomous
+`tests/native_bridge_test.py`; park retirement (P3: a socketed spawned worker
+retires-to-idle instead of blocking-parking; awaiting/non-socketed still park;
+inbound-accept spawn hardening) by `tests/park_retire_test.py`; autonomous
 enactment (P4: the bar, the objection window, TOCTOU-lapse, git audit, human-room
 byte-identity) by `tests/autonomy_test.py`; the seat (P5: document-sovereign BAR,
 presence-weighted tally, frozen voter model, the enact lock, the objection
