@@ -177,15 +177,35 @@ def main():
     #      @mention reaches an attended session on its human's next prompt (user_prompt_submit).
     #      ``AGORA_PARK`` overrides the heuristic either way. Fail toward not-freezing.
     try:
-        should_park = bool(agent["spawned_by"])
+        spawned = bool(agent["spawned_by"])
     except (IndexError, KeyError):
-        should_park = False  # unknown lineage -> treat as attended (never freeze)
+        spawned = False  # unknown lineage -> treat as attended (never freeze)
+
+    # 2.6. P3 — park RETIREMENT. A spawned worker parked (a blocking sleep) only
+    #      because, pre-push-wake, an idle session had no way to be reached for a
+    #      late @mention. If this worker IS push-reachable (its own inbox socket is
+    #      bound and push is on), it can instead RETIRE: return now, go idle, and
+    #      wake on a teammate's @mention via the push nudge (P1) — no frozen session,
+    #      instant wake, no re-park turns, no 2h drop. It stays reachable because
+    #      _push_nudges falls back to the live socket once last_seen ages out.
+    #      Two agents still take the BLOCKING park, because for them the loop earns
+    #      its keep: (a) an agent awaiting the operator — the loop is what enforces
+    #      the 2h ceiling that stops a never-answered escalation from pinning the
+    #      team forever (an idle agent can't self-enforce a ceiling); (b) a
+    #      non-socketed worker (bridge host / feature off) — blocking is its only way
+    #      to stay reachable. Retiring is exactly the attended path (return to idle),
+    #      now safe for a spawned worker too because it has a socket.
+    socketed = bool(os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")) and chat._push_enabled()
+    retire = spawned and socketed and not awaiting_operator
+    should_park = spawned and not retire
     ov = _park_override()
-    if ov is not None:
-        should_park = ov
+    if ov is True:            # AGORA_PARK=1 -> force the old blocking park
+        should_park = True
+    elif ov is False:         # AGORA_PARK=0 -> force no wait (return to idle)
+        should_park = False
     if not should_park:
         chat.del_meta(conn, park_key)
-        return  # allow the stop — never freeze an attended terminal
+        return  # allow the stop — attended terminal, or a push-reachable retiree
 
     # 3. Barrier: exit only when the whole team is done AND we owe the operator
     #    nothing. An awaiting lead keeps the team up so no answer is lost.

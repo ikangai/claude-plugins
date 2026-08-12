@@ -860,6 +860,16 @@ def _spawn_command(name: str, cwd: str, prompt: str | None,
     # flag; a host that doesn't know it (non-Claude, pre-2.1.224) would reject the flag,
     # so it's added only for the Claude launcher — bootstrap already assumes `claude`.
     cmd = f"cd {shlex.quote(cwd)} && {env} {shlex.quote(claude)} -n {shlex.quote(name)}"
+    # Push-reachability hardening (P4, the shippable half): an unattended spawned worker
+    # can't show the inbound-approval dialog, so a peer message to it would be HELD and
+    # expire (5-min) under bypassPermissions — silently unreachable. `crossSessionInbound:
+    # accept` makes Claude Code deliver peer messages straight through, so a teammate's
+    # push-wake nudge always lands. `--settings` layers this ONE key over the worker's
+    # project/plugin settings (its hooks are untouched) — the documented way to let a
+    # headless/unattended worker take messages. Gated on push being enabled so AGORA_PUSH=0
+    # is a single off-switch for the whole native-messaging integration.
+    if _push_enabled():
+        cmd += " --settings " + shlex.quote('{"crossSessionInbound":"accept"}')
     if prompt:
         cmd += " " + shlex.quote(prompt)
     return cmd
@@ -2123,7 +2133,16 @@ def _push_nudges(conn, sender: str, mentions: list[str], msg_id: int) -> None:
             if h == sender_l or h in RESERVED_HANDLES:
                 continue
             a = agent_by_handle(conn, h)
-            if not a or not a["inbox"] or not _is_active(a["last_seen"]):
+            if not a or not a["inbox"]:
+                continue
+            # Reachable if active OR its inbox socket still exists on disk. A P3
+            # retired worker goes idle and its last_seen ages out of the 15-min
+            # window, but it stays wakeable as long as its socket is bound; the
+            # live socket is the truer liveness signal than the DB heuristic. A
+            # stale socket path (dead process) just makes the push fail-open, so
+            # os.path.exists is a safe, cheap gate that never wrongly drops a
+            # reachable idle teammate.
+            if not (_is_active(a["last_seen"]) or os.path.exists(a["inbox"])):
                 continue
             _push_wake(
                 a["inbox"], a["session_id"],
