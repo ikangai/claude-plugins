@@ -854,7 +854,12 @@ def _spawn_command(name: str, cwd: str, prompt: str | None,
         env += f" AGORA_SQUAD={shlex.quote(squad)}"
     if model:
         env += f" AGORA_MODEL={shlex.quote(model)}"
-    cmd = f"cd {shlex.quote(cwd)} && {env} {shlex.quote(claude)}"
+    # Roster/identity bridge (P2): name the NATIVE Claude Code session the same as its
+    # agora handle, so `/list-agents` and `who` agree instead of showing a cwd-derived
+    # alias (e.g. agora `ada` vs native `agora-bb`). `-n/--name` is a stable Claude Code
+    # flag; a host that doesn't know it (non-Claude, pre-2.1.224) would reject the flag,
+    # so it's added only for the Claude launcher — bootstrap already assumes `claude`.
+    cmd = f"cd {shlex.quote(cwd)} && {env} {shlex.quote(claude)} -n {shlex.quote(name)}"
     if prompt:
         cmd += " " + shlex.quote(prompt)
     return cmd
@@ -2130,6 +2135,33 @@ def _push_nudges(conn, sender: str, mentions: list[str], msg_id: int) -> None:
             continue
 
 
+def _native_sessions() -> dict:
+    """Roster/identity bridge (P2): a best-effort read of Claude Code's OWN session
+    registry (``$CLAUDE_CONFIG_DIR/sessions/<pid>.json`` else ``~/.claude/sessions``),
+    keyed by the same ``sessionId`` agora keys its ``agents`` table on. Returns
+    ``{session_id: {name, status, socket}}`` — the native display name (``/list-agents``
+    /``--name``), live busy|idle, and the inbox socket path. ``{}`` on any problem or a
+    non-Claude host: this is advisory annotation for ``who``, never a dependency (the
+    registry shape is Claude Code internals, undocumented — like the push socket)."""
+    out: dict = {}
+    try:
+        base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(
+            os.path.expanduser("~"), ".claude")
+        import glob
+        for p in glob.glob(os.path.join(base, "sessions", "*.json")):
+            try:
+                j = json.load(open(p))
+            except Exception:
+                continue  # one malformed pid-file never blinds the rest
+            sid = j.get("sessionId")
+            if sid:
+                out[sid] = {"name": j.get("name"), "status": j.get("status"),
+                            "socket": j.get("messagingSocketPath")}
+    except Exception:
+        return {}
+    return out
+
+
 def send(conn, sender: str, body: str, session_id: str | None = None,
          kind: str = "chat") -> int:
     # Hub-and-spoke routing: a worker's @human is funnelled to the lead before the
@@ -2480,6 +2512,7 @@ def cmd_who(args):
             squad_captain[sq] = ptr
     chat_ages = last_chat_ages(conn)        # one grouped query, not N
     solo = len(actives) <= 1                # the quiet ◐ has no consumer when alone
+    native = _native_sessions()             # P2 identity bridge (best-effort, may be {})
     for r in rows:
         # ● active · ◐ active-but-quiet (soft stuck/heads-down signal) · ○ idle.
         if not _is_active(r["last_seen"]):
@@ -2499,7 +2532,18 @@ def cmd_who(args):
         foc = f" ▸ {r['focus']}" if r["focus"] else ""
         cwd = f"  [{r['cwd']}]" if r["cwd"] else ""
         toks = f" · {_fmt_count(r['out_tokens'])} out" if r["out_tokens"] else ""
-        print(f"{flag} {r['handle']}{crown}{sq}{status}{foc}{cwd}  "
+        # Identity bridge (P2): if Claude Code knows this session under a DIFFERENT
+        # display name (a human-launched session agora renamed, or a pre-bridge
+        # spawn), surface it so `who` and `/list-agents` cross-reference. After
+        # `bootstrap` names children with `-n <handle>` the two agree and this stays
+        # quiet. A `⌁` marks a push-reachable agent (has a native inbox socket).
+        nat = native.get(r["session_id"] or "")
+        bridge = ""
+        if nat and nat.get("name") and nat["name"].strip().lower() != r["handle"]:
+            bridge += f" ⇄{nat['name']}"
+        if r["inbox"] or (nat and nat.get("socket")):
+            bridge += " ⌁"
+        print(f"{flag} {r['handle']}{crown}{sq}{status}{foc}{cwd}{bridge}  "
               f"(seen {_hhmm(r['last_seen'] or '')}){toks}")
 
     # Team summary — how many instances are working, and against what target. Lets a
@@ -2517,6 +2561,12 @@ def cmd_who(args):
         else:
             line = f"team: {n} active · {done} done"
         print(line)
+        # Push-wake reach (P2): how many teammates wake instantly on an @mention
+        # (have a native inbox socket) vs. only on their next turn / the DB tick.
+        # Dormant on a single-host solo run or a fleet with no sockets (bridge hosts).
+        reach = sum(1 for a in actives if a["inbox"])
+        if n >= 2 and reach:
+            print(f"push-reachable: {reach}/{n} ⌁ (wake instantly on @mention)")
         # Per-squad breakdown when the fleet is sharded (each squad has its own barrier).
         squads = sorted({a["squad"] for a in actives if a["squad"]})
         for sq in squads:
