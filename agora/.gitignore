@@ -1,3 +1,7 @@
 
 # Local development diary (per the diary skill — not part of the plugin)
 .dev-diary/
+
+# autoresearch loop artifacts (test-speed run)
+tests/.test-timings.json
+autoresearch-results.tsv
