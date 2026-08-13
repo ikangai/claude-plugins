@@ -28,15 +28,8 @@ def check(n, c, d=""):
         _failures.append(n)
 
 
-def env_for(root):
-    e = dict(os.environ)
-    e["GROUPCHAT_DIR"] = os.path.join(root, ".groupchat")
-    e.pop("CLAUDE_PROJECT_DIR", None)
-    return e
-
-
-def run(a, e):
-    return subprocess.run([sys.executable, CHAT, *a], capture_output=True, text=True, env=e)
+sys.path.insert(0, HERE)
+from _util import cli as run, env_for  # noqa: E402  (in-process CLI + scrubbed env)
 
 
 def db(root):

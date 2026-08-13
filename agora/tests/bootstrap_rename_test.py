@@ -18,8 +18,13 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
 ROOT = os.path.dirname(HERE)
 CHAT = os.path.join(ROOT, ".groupchat", "chat.py")
+
+# Shared, in-process CLI runner + scrubbed env (dedups the private copies these
+# older standalone modules each carried; `cli` runs chat.main() in-process).
+from _util import cli as run, env_for  # noqa: E402
 
 _failures = []
 
@@ -28,21 +33,6 @@ def check(name, cond, detail=""):
     print(f"  {'PASS' if cond else 'FAIL'}  {name}" + ("" if cond else f"  -- {detail}"))
     if not cond:
         _failures.append(name)
-
-
-def env_for(root, **extra):
-    env = dict(os.environ)
-    env["GROUPCHAT_DIR"] = os.path.join(root, ".groupchat")
-    env.pop("CLAUDE_PROJECT_DIR", None)
-    env.pop("GROUPCHAT_LEAD", None)
-    env.pop("GROUPCHAT_HANDLE", None)
-    env.update(extra)
-    return env
-
-
-def run(args, env):
-    return subprocess.run([sys.executable, CHAT, *args],
-                          capture_output=True, text=True, env=env)
 
 
 def db(root):
