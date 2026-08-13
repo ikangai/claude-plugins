@@ -73,12 +73,62 @@ def worker_env(root: str, **extra) -> dict:
     return env_for(root, GROUPCHAT_SPAWNED_BY="orchestrator", **extra)
 
 
+class _Result:
+    """A subprocess.CompletedProcess look-alike for the in-process `cli` path."""
+    __slots__ = ("returncode", "stdout", "stderr")
+
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+_chat_mod = None
+
+
+def _chat():
+    """Import chat.py once and reuse it. Safe to keep resident: chat has no mutable
+    module-level state (fresh sqlite connection per call; store_dir() reads the env
+    fresh; HANDLE_POOL is read-only), and main(argv)->int never sys.exits."""
+    global _chat_mod
+    if _chat_mod is None:
+        sys.path.insert(0, GROUPCHAT)
+        import chat as _c
+        _chat_mod = _c
+    return _chat_mod
+
+
 def cli(args, env, stdin: str | None = None, timeout: int = 30):
-    """Run ``chat.py <args>`` and capture the result."""
-    return subprocess.run(
-        [sys.executable, CHAT, *args],
-        capture_output=True, text=True, env=env, input=stdin, timeout=timeout,
-    )
+    """Run a ``chat.py`` command IN-PROCESS (chat.main), not as a subprocess — the
+    subprocess only ever re-imported the ~5k-line module (~90ms) to run a stateless
+    command, and the suite makes hundreds of these. chat is dispatched under the
+    call's ``env`` (os.environ swapped and restored) with stdout/stderr captured, so
+    a caller sees the same returncode/stdout/stderr a subprocess produced. Isolation
+    is preserved because chat keeps no cross-call state. (Hooks stay as subprocesses
+    — they're separate scripts, and stop.py's park loop blocks.)"""
+    import contextlib
+    import io
+    import traceback
+    chat = _chat()
+    out, err = io.StringIO(), io.StringIO()
+    saved_env = os.environ.copy()
+    saved_stdin = sys.stdin
+    try:
+        os.environ.clear()
+        os.environ.update(env)
+        if stdin is not None:
+            sys.stdin = io.StringIO(stdin)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                rc = chat.main([str(a) for a in args])
+            except SystemExit as e:          # argparse errors exit(2), etc.
+                rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+            except Exception:                # a crash reads like a non-zero subprocess
+                err.write(traceback.format_exc())
+                rc = 1
+    finally:
+        os.environ.clear()
+        os.environ.update(saved_env)
+        sys.stdin = saved_stdin
+    return _Result(0 if rc is None else rc, out.getvalue(), err.getvalue())
 
 
 def hook(name: str, env, payload, timeout: int = 30):
