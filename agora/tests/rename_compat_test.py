@@ -13,18 +13,13 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _util import Checker, CHAT, tmp_root  # noqa: E402
+from _util import Checker, CHAT, cli as _run, tmp_root  # noqa: E402
 
 
 def _import_chat():
     sys.path.insert(0, os.path.dirname(CHAT))
     import chat  # noqa: E402
     return chat
-
-
-def _run(args, env):
-    return subprocess.run([sys.executable, CHAT, *args],
-                          capture_output=True, text=True, env=env)
 
 
 def _base_env(**extra):
