@@ -60,7 +60,10 @@ def _park_override():
 
 # Poll for this long, then re-park (< the Stop hook timeout of 600s). Env-tunable
 # (and shrunk in tests). Tick is the barrier / @mention detection latency.
-PARK_WINDOW_SECONDS = _envnum("PARK_WINDOW", 570, int)
+# float, not int: whole-second configs still parse (float("570")==570.0), junk still
+# falls back to the default, and a fractional window is now valid (the tests use a
+# sub-second one to avoid idling a full second per parking case).
+PARK_WINDOW_SECONDS = _envnum("PARK_WINDOW", 570, float)
 # Floored to a small positive: a negative env would reach time.sleep() (ValueError,
 # silently defeating the barrier for that agent); 0 would busy-spin the park window.
 POLL_TICK_SECONDS = max(0.05, _envnum("POLL_TICK", 2.0, float))

@@ -30,7 +30,10 @@ sys.path.insert(0, GROUPCHAT)
 import chat  # noqa: E402
 
 SOCK = "/tmp/cc-socks/p3-test.sock"          # any path — retirement checks env presence
-_FAST = dict(GROUPCHAT_PARK_WINDOW=1, GROUPCHAT_POLL_TICK=0.1)
+# A parking test waits out one park window for the re-park block, which the hook
+# emits at the window deadline regardless of how many poll ticks fit — so a short
+# window keeps every assertion and just stops idling a full second per parking test.
+_FAST = dict(GROUPCHAT_PARK_WINDOW=0.3, GROUPCHAT_POLL_TICK=0.1)
 
 
 def room(root):
