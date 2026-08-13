@@ -32,7 +32,12 @@ def _listener(sock_path: str) -> socket.socket:
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     srv.bind(sock_path)
     srv.listen(4)
-    srv.settimeout(2)
+    # A nudge, if one is coming, is written by the (already-completed) `cli` send
+    # subprocess, so its connection is ALREADY queued in this backlog before we
+    # accept — a positive case returns instantly. Only the "nothing should arrive"
+    # assertions wait out the timeout, so keep it short (each negative case cost
+    # 2s → 0.5s; there are several per run).
+    srv.settimeout(0.5)
     return srv
 
 
@@ -43,7 +48,7 @@ def _take_payload(srv: socket.socket):
     except socket.timeout:
         return None
     try:
-        conn.settimeout(2)
+        conn.settimeout(1)
         buf = b""
         while not buf.endswith(b"\n"):
             chunk = conn.recv(4096)
