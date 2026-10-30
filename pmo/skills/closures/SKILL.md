@@ -1,12 +1,12 @@
 ---
 name: closures
-description: Month-end closure driver for CompassAI. Use for "run month-end", "closure status", "what's ready to approve", "sweep closures" — sweeps the portfolio for a month, buckets projects (missing/open/locked/approved), collects blockers, presents an approve/reject decision table, and can create missing closure drafts. Argument is the month as YYYY-MM (defaults to the current month).
+description: Month-end closure driver for IKANGAI Signals. Use for "run month-end", "closure status", "what's ready to approve", "sweep closures" — sweeps the portfolio for a month, buckets projects (missing/open/locked/approved), collects blockers, presents an approve/reject decision table, and can create missing closure drafts. Argument is the month as YYYY-MM (defaults to the current month).
 argument-hint: [YYYY-MM]
 ---
 
 # Month-end closure driver
 
-Load the pmo:compass-operating skill first if not already loaded this session
+Load the pmo:signals-operating skill first if not already loaded this session
 (Skill tool). All tier rules come from it.
 
 **Month**: parse from $ARGUMENTS (YYYY-MM); default = current month
@@ -14,9 +14,9 @@ Load the pmo:compass-operating skill first if not already loaded this session
 
 ## Step 1 — Portfolio sweep (Tier 0)
 
-1. `compass_call {command: "closures matrix", query: {year: YEAR}}` — closure
+1. `signals_call {command: "closures matrix", query: {year: YEAR}}` — closure
    status per project × month (deliberately portfolio-wide).
-2. `compass_call {command: "projects list", query: {year: YEAR}}` — the
+2. `signals_call {command: "projects list", query: {year: YEAR}}` — the
    denominator.
 
 Bucket every project that is not Closed/Cancelled, for the target month:
@@ -29,12 +29,12 @@ Bucket every project that is not Closed/Cancelled, for the target month:
 
 Spawn one pmo:pmo-collector agent per project in locked/open/missing — in
 parallel; if more than ~8, batch several projects per collector, using the
-project's `projectId` (from the Step 1 matrix rows; the list's `project_id`
-is the same value) as `<projectId>`. Give each the compass_call invocations
+project's `projectId` (the Step 1 matrix rows and the project list agree on
+that spelling) as `<projectId>`. Give each the signals_call invocations
 plus:
-- missing/open: `compass_call {command: "closures preflight", args:
+- missing/open: `signals_call {command: "closures preflight", args:
   ["<projectId>", "<YYYY-MM>"]}` → blockers, warnings
-- open/locked (pmcId comes from the matrix): `compass_call {command:
+- open/locked (pmcId comes from the matrix): `signals_call {command:
   "closures get", args: ["<pmcId>"]}` → read `status`/`notes`/`isFinal`/`kpis`
   from the returned JSON (raw KPI numbers + notes)
 Ask for the shape
@@ -55,7 +55,9 @@ Present ONE table, most actionable first:
   schedule) as anomalies; say why clean, citing the numbers
 - **Investigate before deciding** — locked but has preflight warnings or a
   flagged KPI anomaly (list the specific numbers)
-- **In progress** — open, each project's blockers and its PM
+- **In progress** — open, each project's blockers and its PM. A
+  `finance_ac_missing` blocker means the month CANNOT be locked by anyone
+  until its actual cost is entered (0 is allowed) — name it first
 - **Missing** — no closure yet, with anything preflight says would block it
 - One line: "N already approved."
 Name collectors that errored; never silently drop a project.
@@ -63,15 +65,17 @@ Name collectors that errored; never silently drop a project.
 ## Step 4 — Actions
 
 - **Tier 1 (autonomous):** for missing projects whose preflight is clean,
-  create the draft: `compass_call {command: "closures create", body:
+  create the draft: `signals_call {command: "closures create", body:
   {projectId: <projectId>, monthStart: "<MONTH_START>"}, dryRun: true}` then
   live (omit `dryRun`). A 409 means it already exists — re-bucket, not an
-  error. Do NOT create drafts where preflight shows blockers — surface those
-  instead. List every draft created in the summary.
+  error. Do NOT create drafts where preflight shows blockers other than
+  `finance_ac_missing` — surface those instead. (`finance_ac_missing` blocks
+  the LOCK, not the draft: the month's actual cost is entered ON the closure,
+  so a draft is how it gets entered.) List every draft created in the summary.
 - **Tier 2 (per-action confirmation, only when the user asks):**
-  - approve: show `compass_call {command: "closures approve", args:
+  - approve: show `signals_call {command: "closures approve", args:
     ["<pmcId>"], dryRun: true}` output → confirm → run live (omit `dryRun`).
-  - reject: requires a reason — `compass_call {command: "closures reject",
+  - reject: requires a reason — `signals_call {command: "closures reject",
     args: ["<pmcId>"], body: {rejectionReason: "<reason>"}}` (exact field
     name; the route 400s otherwise). Dry-run first → confirm → live.
 

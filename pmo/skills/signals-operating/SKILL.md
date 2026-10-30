@@ -1,41 +1,41 @@
 ---
-name: compass-operating
-description: Foundation for operating a CompassAI instance through the bundled remote MCP connector. Load FIRST from any pmo workflow skill (closures, briefing, capacity, chase) or whenever calling CompassAI — the connector tools, auth/preset preflight, error decoding, context-lean reads, the write-safety tier policy, and CompassAI domain conventions.
+name: signals-operating
+description: Foundation for operating a IKANGAI Signals instance through the bundled remote MCP connector. Load FIRST from any pmo workflow skill (closures, briefing, capacity, chase) or whenever calling IKANGAI Signals — the connector tools, auth/preset preflight, error decoding, context-lean reads, the write-safety tier policy, and IKANGAI Signals domain conventions.
 user-invocable: false
 ---
 
-# Operating CompassAI via the remote MCP connector
+# Operating IKANGAI Signals via the remote MCP connector
 
-This plugin bundles a remote MCP connector named **`compassai`**
-(`https://compassai.ikangai.com/mcp`). No CLI, no `npm link` — installing the
+This plugin bundles a remote MCP connector named **`signals`**
+(`https://signals.ikangai.com/mcp`). No CLI, no `npm link` — installing the
 plugin is enough.
 
 ## 1. The connector tools
 
-The `compassai` connector exposes three generic tools:
+The `signals` connector exposes three generic tools:
 
-- **`compass_describe {filter?}`** — discover the command surface. Returns each
+- **`signals_describe {filter?}`** — discover the command surface. Returns each
   matching command's name, HTTP method, path, positional `args`, `query` params,
   whether it `write`s, and notes. Call this FIRST to find the exact command name
-  and its args before `compass_call`.
-- **`compass_call {command, args?, query?, body?, dryRun?, forceReplace?}`** —
+  and its args before `signals_call`.
+- **`signals_call {command, args?, query?, body?, dryRun?, forceReplace?}`** —
   run one command. `command` is the exact name (e.g. `"closures list"`); `args`
   are positional path params in order (e.g. `["PRJ-001"]`); `query` is
   query-string params (e.g. `{year: 2026}`); `body` is the JSON request body for
   writes. The primary tool.
-- **`compass_api {method, path, query?, body?}`** — raw HTTP escape hatch for
-  endpoints not wrapped as a command. Prefer `compass_call`.
+- **`signals_api {method, path, query?, body?}`** — raw HTTP escape hatch for
+  endpoints not wrapped as a command. Prefer `signals_call`.
 
 ## 2. Preflight (once per session)
 
-1. `compass_call {command: "health"}` — API liveness + DB, no auth needed. On
+1. `signals_call {command: "health"}` — API liveness + DB, no auth needed. On
    failure, report it and stop; nothing else will work.
 2. **Auth is OAuth, handled by the host.** If a call returns an auth error
    (401/403 auth), the host prompts the user to connect (browser login +
    consent) and refreshes the token automatically. **Never ask for, or handle, a
    password or token** — you don't manage credentials. If the user isn't
-   connected, tell them to authorize the `compassai` connector when prompted.
-3. `compass_call {command: "preset"}` — note enabled features. If a workflow
+   connected, tell them to authorize the `signals` connector when prompted.
+3. `signals_call {command: "preset"}` — note enabled features. If a workflow
    section needs a disabled feature, skip that section and say which feature the
    deployment strips — never fail the whole workflow over it.
 4. Role expectations: pmo workflows assume PMO credentials. A PM-only login sees
@@ -43,7 +43,7 @@ The `compassai` connector exposes three generic tools:
    approve/reject closures. Some portfolio endpoints are PMO-only outright (e.g.
    `closures matrix` → 403 for a PM-only login) — a 403 there means wrong role,
    not thin data. If results look implausibly thin, check
-   `compass_call {command: "whoami"}` and warn the user.
+   `signals_call {command: "whoami"}` and warn the user.
 
 ## 3. Errors & the 404-vs-403 decoder
 
@@ -51,14 +51,16 @@ A failing tool call returns an **`isError` result** carrying the classified
 `{error, code}` (the same shape the CLI prints). Decode:
 auth error (401 = token expired → host re-prompts OAuth; 403 = role gate,
 re-auth will NOT help) · not-found OR hidden by PM-scope OR feature disabled by
-preset (body code `PRESET_DISABLED`) · 409 conflict · rate-limited (back off;
+preset (body code `PRESET_DISABLED`) · 409 conflict — `code` is the API's own
+(e.g. `CLOSURE_FINANCE_ACTUALS_MISSING`, `ROW_VERSION_CONFLICT`), with its detail
+in `extra`; bare `CONFLICT` only when the API named none · rate-limited (back off;
 never loop).
 
 ## 4. Keep reads context-lean
 
 Constrain reads with `query` where the endpoint supports it (e.g.
 `{limit: N, year: YYYY}`); otherwise read the returned JSON and extract only
-what you need. Discover exact params with `compass_describe {filter: "closures"}`
+what you need. Discover exact params with `signals_describe {filter: "closures"}`
 — formats vary: `closures preflight` takes YYYY-MM; timesheet filters are
 YYYY-MM-DD `startDate`/`endDate`; `closures list` wants integer `year`/`month`.
 
@@ -67,7 +69,7 @@ YYYY-MM-DD `startDate`/`endDate`; `closures list` wants integer `year`/`month`.
 - **Tier 0 — reads: free.** No confirmation.
 - **Tier 1 — autonomous.** Additive, reversible drafts only. Currently exactly
   two things, each with its own procedure:
-  (a) `compass_call {command: "closures create", body: {…}}` (creates an Open,
+  (a) `signals_call {command: "closures create", body: {…}}` (creates an Open,
   editable snapshot) — call with `dryRun: true`, sanity-check the printed
   request, then call live (`dryRun` omitted);
   (b) drafting chase-message text — the draft in your reply IS the whole action;
@@ -77,27 +79,34 @@ YYYY-MM-DD `startDate`/`endDate`; `closures list` wants integer `year`/`month`.
   writes: `closures approve` / `closures reject` / `closures lock` /
   `closures unlock`, `invoices status`, `timesheets approve` / `timesheets
   reject`, every delete, anything requiring `forceReplace: true`. Procedure: show
-  the exact `compass_call` AND its `dryRun: true` output, get explicit
+  the exact `signals_call` AND its `dryRun: true` output, get explicit
   confirmation per action (a batch may be confirmed at once only after every
   target is listed), then execute live.
 - Anything not named in Tier 1 is Tier 2 by default. Expanding Tier 1 is a
   design change, not a judgment call.
 
-## 6. CompassAI domain conventions
+## 6. IKANGAI Signals domain conventions
 
 - **Net sales** = total_selling − sales_discount. ALL margin/profit/EVM math
   uses net sales.
 - **Closure lifecycle**: Open → Locked → Approved; reject returns Locked → Open
-  with a reason (body field name exactly `rejectionReason`). One closure per
+  with a reason (body field name exactly `rejectionReason`). **No lock without
+  actual cost** (owner decision 2026-09-30, every caller): `closures lock`
+  answers 409 `CLOSURE_FINANCE_ACTUALS_MISSING` until the month's AC is
+  entered (`closures update` with the parts, e.g. `kpis.acManpower` — the
+  total is derived while the stored total is empty or was their sum; parts
+  that would replace a total entered apart from them are 409
+  `CLOSURE_AC_TOTAL_CONFLICT` — send `acMonth` with them). 0 only when the month truly had no cost; never enter 0 to
+  get past the gate. Ask whoever owns the number. One closure per
   project per month (409 on duplicate). Corrections after approval go through
   `closures new-version` (marks the old one Superseded).
 - **The monthly closure is the month-end anchor**: readiness =
   `closures preflight`, portfolio state = `closures matrix`.
 - **EVM is cost-based** (actual/budget ratio), not progress-based.
 - **Presets are orthogonal to roles**: effective access = role AND preset.
-- **Seeding side effect**: `projects invoices` on a project with zero billing
-  invoices SEEDS planned rows from the cost sheet — a read with a write side
-  effect. For pure reads use `invoices list` with `query: {projectId: …}`.
+- **Seeding is explicit (#2278)**: `projects invoices` is a pure read (it only
+  reports `prefillAvailable`); `projects invoices prefill` WRITES planned rows
+  from the cost sheet (Tier 1).
 
 ## 7. Redacted mode (PII)
 

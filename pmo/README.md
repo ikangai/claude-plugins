@@ -1,8 +1,8 @@
-# pmo — CompassAI PMO Assistant (Claude plugin)
+# pmo — IKANGAI Signals PMO Assistant (Claude plugin)
 
 Turns a Claude Code **or Claude Desktop** session into a PMO assistant for a
-running CompassAI instance. Four workflows over a **bundled remote MCP
-connector** (`compassai` → `https://compassai.ikangai.com/mcp`) — **no CLI, no
+running IKANGAI Signals instance. Four workflows over a **bundled remote MCP
+connector** (`signals` → `https://signals.ikangai.com/mcp`) — **no CLI, no
 `npm link`**:
 
 | Command | What it does |
@@ -13,22 +13,22 @@ connector** (`compassai` → `https://compassai.ikangai.com/mcp`) — **no CLI, 
 | `/pmo:chase [YYYY-MM]` | Missing-timesheet + overdue-invoice chase list with copy-ready nudges |
 
 All four also trigger ambiently from natural language ("how's month-end
-looking?"). The shared `compass-operating` skill handles connector tools, the
+looking?"). The shared `signals-operating` skill handles connector tools, the
 auth/preset preflight, and the write-safety policy; the `pmo-collector` agent
 keeps JSON-heavy sweeps out of the main context.
 
 ## How it connects (no CLI)
 
 The plugin declares an MCP connector in `plugin.json`
-(`mcpServers.compassai`). Its three tools — `compass_describe`, `compass_call`,
-`compass_api` — reach the CompassAI REST API. **Auth is OAuth 2.1, run by the
+(`mcpServers.signals`). Its three tools — `signals_describe`, `signals_call`,
+`signals_api` — reach the IKANGAI Signals REST API. **Auth is OAuth 2.1, run by the
 host:** the first call gets a `401 + WWW-Authenticate`, Claude opens a browser
 for login + consent, and caches/refreshes the token. You never handle a
 password or token.
 
 ## Prerequisites
 
-- **A running CompassAI instance** with the remote-MCP + OAuth surface deployed
+- **A running IKANGAI Signals instance** with the remote-MCP + OAuth surface deployed
   (`/mcp`, `/oauth/*`, `/.well-known/oauth-*`).
 - **A PMO-credentialed account** — you authorize it in the browser when the
   connector prompts. PM-only logins get scoped (thin) results; employee logins
@@ -79,15 +79,15 @@ installing.
 
 - `structure.test.mjs` — manifest + frontmatter validation for all
   skills/agents (incl. the collector's connector-tool scoping).
-- `cli-drift.test.mjs` — every `compass_call {command}` referenced by a skill
-  must exist in the CompassAI command manifest (imports
+- `cli-drift.test.mjs` — every `signals_call {command}` referenced by a skill
+  must exist in the IKANGAI Signals command manifest (imports
   `cli/lib/manifest/index.js` — the same manifest the MCP reuses; zero network).
 
 ## Smoke recipe (behavioral check)
 
-1. Ensure the CompassAI instance the connector points at is reachable and has
+1. Ensure the IKANGAI Signals instance the connector points at is reachable and has
    the remote-MCP + OAuth surface deployed.
-2. Install the plugin; on first tool call, authorize the `compassai` connector
+2. Install the plugin; on first tool call, authorize the `signals` connector
    in the browser (a PMO account).
 3. Run each of the four commands.
 4. Expect: closures sweep buckets projects for the month; briefing ranks them

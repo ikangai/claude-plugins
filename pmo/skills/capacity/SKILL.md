@@ -1,23 +1,23 @@
 ---
 name: capacity
-description: Resource capacity and over-allocation check for CompassAI. Use for "who's over-allocated", "capacity check", "staffing gaps", "allocation vs actuals" — analyzes the planned-vs-actual allocation matrix for over-allocations, allocation cliffs, and plan/actual divergence. Argument is the year (defaults to current).
+description: Resource capacity and over-allocation check for IKANGAI Signals. Use for "who's over-allocated", "capacity check", "staffing gaps", "allocation vs actuals" — analyzes the planned-vs-actual allocation matrix for over-allocations, allocation cliffs, and plan/actual divergence. Argument is the year (defaults to current).
 argument-hint: [year]
 ---
 
 # Capacity & over-allocation check
 
-Load the pmo:compass-operating skill first if not already loaded. YEAR from
+Load the pmo:signals-operating skill first if not already loaded. YEAR from
 $ARGUMENTS, default current year. Tier 0 only — never writes.
 
 ## Step 1 — The matrix
 
-`compass_call {command: "capacity", query: {year: YEAR}}` — one server-side
+`signals_call {command: "capacity", query: {year: YEAR}}` — one server-side
 aggregated call (project × employee monthly planned % vs actual %). Usually
 no fan-out needed; if the response is huge, re-pull filtered (`query:
 {customerId: …}` or `{projectId: …}`) — otherwise read the returned JSON and
 extract what you need.
 Note: a PM-only login sees only its own projects — if the matrix looks thin,
-check `compass_call {command: "whoami"}` and warn.
+check `signals_call {command: "whoami"}` and warn.
 
 ## Step 2 — Analyze (in context)
 
@@ -30,7 +30,7 @@ check `compass_call {command: "whoami"}` and warn.
   percentage points for 2+ months — plan rot; name the projects.
 
 Optional drill-down for flagged employees only — one pmo:pmo-collector with
-`compass_call {command: "timesheets list", query: {employeeId: "<id>",
+`signals_call {command: "timesheets list", query: {employeeId: "<id>",
 startDate: "YEAR-01-01", endDate: "YEAR-12-31"}}` (read
 `projectId`/`workDate`/`hoursWorked`/`status` from the returned rows).
 
