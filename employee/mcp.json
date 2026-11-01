@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "signals": {
+      "type": "streamable-http",
+      "url": "https://signals.ikangai.com/mcp"
+    }
+  }
+}

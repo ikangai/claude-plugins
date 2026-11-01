@@ -1,6 +1,6 @@
 # pm — IKANGAI Signals Project Manager Assistant (Claude plugin)
 
-Turns a Claude Code **or Claude Desktop** session into an assistant for a
+Turns a Claude Code, Claude Desktop **or ChatGPT** session into an assistant for a
 project manager on a running IKANGAI Signals instance. Four workflows over a
 **bundled remote MCP connector** (`signals` → `https://signals.ikangai.com/mcp`)
 — no CLI:
@@ -35,10 +35,25 @@ Approving closures stays with the PMO (the pmo plugin).
 
 ## Install
 
-From a clone of this repo (Claude Code): `/plugin marketplace add .` then
-`/plugin install pm`. One session only: `claude --plugin-dir ./plugins/pm/`.
-Public one-click install: `/plugin marketplace add ikangai/claude-plugins`
-then `/plugin install pm@ikangai`.
+Published in the public marketplace `ikangai/claude-plugins`. After installing,
+connect the `signals` connector once (browser sign-in to IKANGAI Signals).
+
+- **Claude Code:** `/plugin marketplace add ikangai/claude-plugins`, then
+  `/plugin install pm@ikangai`. From a clone of this repo: `/plugin marketplace
+  add .` then `/plugin install pm`; one session only: `claude --plugin-dir
+  ./plugins/pm/`.
+- **Claude Desktop:** Customize → Plugins → Add → Add marketplace →
+  `ikangai/claude-plugins`, install **pm**, then open its Connectors tab and
+  connect `signals`. Team/Enterprise: an Owner syncs the repo under
+  Organization settings → Plugins & skills (and can set it Installed by
+  default); each member still connects. Skills work in chat and Cowork.
+- **ChatGPT desktop:** the plugin root also carries the portable
+  `plugin.json` + `mcp.json` (agent-plugins.org 1.0.0). Workspace: an admin
+  imports the repo under Admin → Plugins and publishes it to the roles that
+  need it. Personal: clone `ikangai/claude-plugins`, copy `pm/` to
+  `~/.codex/plugins/pm/`, list it in `~/.agents/plugins/marketplace.json`,
+  restart the app, install from the Plugins Directory. ChatGPT runs OAuth on
+  install.
 
 ## Tests
 

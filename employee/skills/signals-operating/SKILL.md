@@ -7,8 +7,10 @@ user-invocable: false
 # Operating IKANGAI Signals via the remote MCP connector
 
 This plugin bundles a remote MCP connector named **`signals`**
-(`https://signals.ikangai.com/mcp`). No CLI, no `npm link` — installing the
-plugin is enough.
+(`https://signals.ikangai.com/mcp`). No CLI, no `npm link` — install the plugin
+and connect the connector (one sign-in). The same skills run in Claude Code,
+Claude Desktop and ChatGPT; tool names below are the plain MCP names, whatever
+prefix the app adds.
 
 ## 1. The connector tools
 
@@ -84,6 +86,10 @@ what you need. Discover exact params with `signals_describe {filter: "closures"}
 — formats vary: `closures preflight` takes YYYY-MM; timesheet filters are
 YYYY-MM-DD `startDate`/`endDate`; `closures list` wants integer `year`/`month`.
 
+A workflow that hands reads to the pmo-collector subagent still works where
+the app has no subagents (Claude chat, ChatGPT): make the same calls yourself,
+one project at a time, and keep only the fields of the shape it asks for.
+
 ## 5. Write-safety tiers (policy for ALL workflows, every plugin)
 
 - **Tier 0 — reads: free.** No confirmation.
@@ -115,6 +121,9 @@ YYYY-MM-DD `startDate`/`endDate`; `closures list` wants integer `year`/`month`.
 
 ## 6. IKANGAI Signals domain conventions
 
+- **Today**: "current month/week" defaults come from the date the app gives
+  you. Not sure of it? Ask the user before any write — a wrong month creates
+  drafts in the wrong period.
 - **Net sales** = total_selling − sales_discount. ALL margin/profit/EVM math
   uses net sales.
 - **Closure lifecycle**: Open → Locked → Approved; reject returns Locked → Open

@@ -6,8 +6,7 @@ argument-hint: <project code> [YYYY-MM]
 
 # Month-end for my project
 
-Load the pm:signals-operating skill first if not already loaded this session
-(Skill tool). All tier rules come from it — especially the closure
+Load the signals-operating skill first if not already loaded this session. All tier rules come from it — especially the closure
 lifecycle and the "no lock without actual cost" rule in §6.
 
 **Inputs**: project code and MONTH (YYYY-MM) from $ARGUMENTS; month default

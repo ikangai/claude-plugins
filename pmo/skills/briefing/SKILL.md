@@ -6,7 +6,7 @@ argument-hint: [customer-or-project filter]
 
 # Portfolio health briefing
 
-Load the pmo:signals-operating skill first if not already loaded. YEAR =
+Load the signals-operating skill first if not already loaded. YEAR =
 current year. This workflow is Tier 0 only — it never writes. In particular,
 never call `projects invoices prefill` here (it seeds rows); `projects invoices`
 and `invoices list` are pure reads.
@@ -20,7 +20,7 @@ substring, case-insensitive). The default list already excludes inactive
 
 ## Step 2 — Collect (fan out)
 
-Portfolio-level — ONE pmo:pmo-collector with:
+Portfolio-level — ONE pmo-collector subagent with:
 - `signals_call {command: "invoices aging"}`
 - `signals_call {command: "capacity", query: {year: YEAR}}`
 - `signals_call {command: "closures matrix", query: {year: YEAR}}`

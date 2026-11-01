@@ -1,0 +1,30 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "pm",
+  "version": "0.1.1",
+  "description": "Project-manager assistant for a running IKANGAI Signals instance: project status, month-end closure prep and lock, timesheet and expense approvals, and keeping risks, issues, actions and decisions current — via a bundled remote MCP connector (OAuth), no CLI required.",
+  "author": {
+    "name": "Martin Treiber",
+    "email": "martin.treiber@gmail.com"
+  },
+  "homepage": "https://signals.ikangai.com",
+  "repository": "https://github.com/ikangai/CompassAI",
+  "keywords": [
+    "signals",
+    "project-management",
+    "month-end",
+    "approvals",
+    "raid"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "IKANGAI Signals Project Manager Assistant",
+        "shortDescription": "Project status, month-end, approvals and RAID for your projects",
+        "developerName": "ikangai",
+        "category": "Productivity",
+        "websiteURL": "https://signals.ikangai.com"
+      }
+    }
+  }
+}

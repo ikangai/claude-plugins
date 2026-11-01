@@ -6,8 +6,7 @@ argument-hint: <project code>
 
 # RAID log
 
-Load the pm:signals-operating skill first if not already loaded this session
-(Skill tool). All tier rules come from it: every create, update and delete
+Load the signals-operating skill first if not already loaded this session. All tier rules come from it: every create, update and delete
 here is Tier 2.
 
 **Project**: from $ARGUMENTS; none and more than one project → list yours

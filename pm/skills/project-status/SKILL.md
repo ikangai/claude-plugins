@@ -6,8 +6,7 @@ argument-hint: [project code]
 
 # My projects' status
 
-Load the pm:signals-operating skill first if not already loaded this session
-(Skill tool). All tier rules come from it. This workflow is Tier 0 only — it
+Load the signals-operating skill first if not already loaded this session. All tier rules come from it. This workflow is Tier 0 only — it
 never writes.
 
 ## Step 1 — Scope
@@ -38,5 +37,5 @@ One row per project, most attention-worthy first: health, the money line
 (as the report states it — invoiced vs recognised revenue are different
 figures; quote the basis), delivery progress, top risk, overdue action
 count. Below it, per project needing attention: what, why (cite the
-numbers), and the next step — pointing to the pm:raid or pm:month-end skill
+numbers), and the next step — pointing to the raid or month-end skill
 where it fits. Null means "not measured", never 0.

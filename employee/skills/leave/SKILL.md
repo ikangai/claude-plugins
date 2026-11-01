@@ -6,8 +6,8 @@ argument-hint: [type and dates]
 
 # My leave
 
-Load the employee:signals-operating skill first if not already loaded this
-session (Skill tool). All tier rules come from it. A 404 `PRESET_DISABLED`
+Load the signals-operating skill first if not already loaded this
+session. All tier rules come from it. A 404 `PRESET_DISABLED`
 means this deployment has no leave management — say so and stop.
 
 ## Step 1 — Balances and history (Tier 0)

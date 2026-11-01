@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "signals": {
+      "type": "http",
+      "url": "https://signals.ikangai.com/mcp"
+    }
+  }
+}

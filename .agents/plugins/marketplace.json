@@ -1,0 +1,44 @@
+{
+  "name": "ikangai",
+  "interface": {
+    "displayName": "ikangai"
+  },
+  "plugins": [
+    {
+      "name": "pmo",
+      "source": {
+        "source": "local",
+        "path": "./pmo"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "pm",
+      "source": {
+        "source": "local",
+        "path": "./pm"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    },
+    {
+      "name": "employee",
+      "source": {
+        "source": "local",
+        "path": "./employee"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

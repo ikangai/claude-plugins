@@ -6,7 +6,7 @@ argument-hint: [YYYY-MM]
 
 # Compliance chase
 
-Load the pmo:signals-operating skill first if not already loaded. MONTH from
+Load the signals-operating skill first if not already loaded. MONTH from
 $ARGUMENTS (YYYY-MM), default current month. FIRST/LAST = first and last day
 of MONTH as YYYY-MM-DD. Reads are Tier 0; drafting messages is Tier 1 — text
 only, since the connector has no notifications-send tool yet (delivery is
@@ -14,7 +14,7 @@ manual in v1).
 
 ## Step 1 — Timesheet compliance (fan out)
 
-One pmo:pmo-collector with:
+One pmo-collector subagent with:
 - `signals_call {command: "employees list"}` (active employees only; read
   `id`/`name` from the JSON)
 - `signals_call {command: "timesheets list", query: {startDate: "<FIRST>",

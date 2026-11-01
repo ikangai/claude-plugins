@@ -6,8 +6,7 @@ argument-hint: [project code]
 
 # My approvals
 
-Load the pm:signals-operating skill first if not already loaded this session
-(Skill tool). All tier rules come from it: every approve and reject is
+Load the signals-operating skill first if not already loaded this session. All tier rules come from it: every approve and reject is
 Tier 2.
 
 ## Step 1 — What's waiting (Tier 0)

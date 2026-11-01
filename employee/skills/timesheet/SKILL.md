@@ -6,8 +6,8 @@ argument-hint: [YYYY-MM-DD | last]
 
 # My timesheet
 
-Load the employee:signals-operating skill first if not already loaded this
-session (Skill tool). All tier rules come from it.
+Load the signals-operating skill first if not already loaded this
+session. All tier rules come from it.
 
 **Week**: from $ARGUMENTS — a date (its Monday–Sunday week) or `last` (the
 previous week); default = the current week. MON/SUN = the week's first and

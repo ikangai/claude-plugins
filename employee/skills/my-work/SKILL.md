@@ -5,8 +5,8 @@ description: What's on your plate in IKANGAI Signals. Use for "what should I wor
 
 # My work
 
-Load the employee:signals-operating skill first if not already loaded this
-session (Skill tool). All tier rules come from it.
+Load the signals-operating skill first if not already loaded this
+session. All tier rules come from it.
 
 ## Step 1 — The list (Tier 0)
 

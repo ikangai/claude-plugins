@@ -6,7 +6,7 @@ argument-hint: [year]
 
 # Capacity & over-allocation check
 
-Load the pmo:signals-operating skill first if not already loaded. YEAR from
+Load the signals-operating skill first if not already loaded. YEAR from
 $ARGUMENTS, default current year. Tier 0 only — never writes.
 
 ## Step 1 — The matrix
@@ -29,7 +29,7 @@ check `signals_call {command: "me"}` and warn.
 - **Plan-vs-actual divergence**: actuals present and |actual − planned| ≥ 25
   percentage points for 2+ months — plan rot; name the projects.
 
-Optional drill-down for flagged employees only — one pmo:pmo-collector with
+Optional drill-down for flagged employees only — one pmo-collector subagent with
 `signals_call {command: "timesheets list", query: {employeeId: "<id>",
 startDate: "YEAR-01-01", endDate: "YEAR-12-31"}}` (read
 `projectId`/`workDate`/`hoursWorked`/`status` from the returned rows).

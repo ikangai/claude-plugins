@@ -1,6 +1,6 @@
 # pmo — IKANGAI Signals PMO Assistant (Claude plugin)
 
-Turns a Claude Code **or Claude Desktop** session into a PMO assistant for a
+Turns a Claude Code, Claude Desktop **or ChatGPT** session into a PMO assistant for a
 running IKANGAI Signals instance. Four workflows over a **bundled remote MCP
 connector** (`signals` → `https://signals.ikangai.com/mcp`) — **no CLI, no
 `npm link`**:
@@ -19,10 +19,10 @@ keeps JSON-heavy sweeps out of the main context.
 
 ## How it connects (no CLI)
 
-The plugin declares an MCP connector in `plugin.json`
-(`mcpServers.signals`). Its three tools — `signals_describe`, `signals_call`,
+The plugin declares an MCP connector in `.mcp.json` (Claude) and `mcp.json`
+(ChatGPT). Its three tools — `signals_describe`, `signals_call`,
 `signals_api` — reach the IKANGAI Signals REST API. **Auth is OAuth 2.1, run by the
-host:** the first call gets a `401 + WWW-Authenticate`, Claude opens a browser
+host:** the first call gets a `401 + WWW-Authenticate`, the app opens a browser
 for login + consent, and caches/refreshes the token. You never handle a
 password or token.
 
@@ -48,34 +48,32 @@ v1 never sends notifications — chase messages are copy-ready text.
 
 ## Install
 
-The plugin is self-contained (the connector + OAuth handle all access).
+Published in the public marketplace `ikangai/claude-plugins`. After installing,
+connect the `signals` connector once (browser sign-in to IKANGAI Signals).
 
-**Persistent (via the repo-root marketplace)** — this repo ships a marketplace
-at `.claude-plugin/marketplace.json` listing `pmo` (a `git-subdir` source on
-`main`). From a local clone (Claude Code):
-
-    /plugin marketplace add .
-    /plugin install pmo
-
-**Quickest (Claude Code, one session)** — load straight from the working tree:
-
-    claude --plugin-dir ./plugins/pmo/
-
-**Claude Desktop** — marketplace installs only (not `--plugin-dir`): add the
-marketplace by a repo/URL the app can reach, then `/plugin install pmo`. The
-remote connector + OAuth work the same there — the login/consent opens in the
-desktop app's browser.
-
-**Verify / troubleshoot:**
-
-    /plugin list            # confirm pmo is installed and enabled
-    /plugin info pmo        # show its commands, skills, agent, and connector
-    /reload-plugins         # after enabling/disabling or editing skills
-
-`claude plugin validate plugins/pmo` checks the plugin structure without
-installing.
+- **Claude Code:** `/plugin marketplace add ikangai/claude-plugins`, then
+  `/plugin install pmo@ikangai`. From a clone of this repo: `/plugin marketplace
+  add .` then `/plugin install pmo`; one session only: `claude --plugin-dir
+  ./plugins/pmo/`.
+- **Claude Desktop:** Customize → Plugins → Add → Add marketplace →
+  `ikangai/claude-plugins`, install **pmo**, then open its Connectors tab and
+  connect `signals`. Team/Enterprise: an Owner syncs the repo under
+  Organization settings → Plugins & skills (and can set it Installed by
+  default); each member still connects. Skills work in chat and Cowork; the
+  pmo collector agent only in Cowork (in chat the skills make the calls
+  themselves).
+- **ChatGPT desktop:** the plugin root also carries the portable
+  `plugin.json` + `mcp.json` (agent-plugins.org 1.0.0). Workspace: an admin
+  imports the repo under Admin → Plugins and publishes it to the roles that
+  need it. Personal: clone `ikangai/claude-plugins`, copy `pmo/` to
+  `~/.codex/plugins/pmo/`, list it in `~/.agents/plugins/marketplace.json`,
+  restart the app, install from the Plugins Directory. ChatGPT runs OAuth on
+  install.
 
 ## Tests
+
+`claude plugin validate plugins/pmo` checks the plugin structure without
+installing; `/plugin info pmo` shows what a session loaded.
 
     node --test plugins/tests/*.test.mjs
 

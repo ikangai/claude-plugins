@@ -6,11 +6,10 @@ argument-hint: [YYYY-MM]
 
 # Month-end closure driver
 
-Load the pmo:signals-operating skill first if not already loaded this session
-(Skill tool). All tier rules come from it.
+Load the signals-operating skill first if not already loaded this session. All tier rules come from it.
 
 **Month**: parse from $ARGUMENTS (YYYY-MM); default = current month
-(`date +%Y-%m`). Derive YEAR, and MONTH_START = YYYY-MM-01.
+(signals-operating §6). Derive YEAR, and MONTH_START = YYYY-MM-01.
 
 ## Step 1 — Portfolio sweep (Tier 0)
 
@@ -27,7 +26,7 @@ Bucket every project that is not Closed/Cancelled, for the target month:
 
 ## Step 2 — Collect detail (Tier 0, fan out)
 
-Spawn one pmo:pmo-collector agent per project in locked/open/missing — in
+Spawn one pmo-collector subagent per project in locked/open/missing — in
 parallel; if more than ~8, batch several projects per collector, using the
 project's `projectId` (the Step 1 matrix rows and the project list agree on
 that spelling) as `<projectId>`. Give each the signals_call invocations

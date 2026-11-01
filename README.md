@@ -50,6 +50,27 @@ Docs and release notes: [`groupchat/README.md`](groupchat/README.md) ·
 [`groupchat/RELEASES.md`](groupchat/RELEASES.md). Developed in
 [martintreiber/claude_chat](https://github.com/martintreiber/claude_chat).
 
+### IKANGAI Signals role plugins — `pmo` · `pm` · `employee`
+
+Assistants for a running [IKANGAI Signals](https://signals.ikangai.com)
+instance, one per role, over one remote MCP connector (OAuth — you sign in once
+with your Signals account; your role decides what you may do):
+
+- **pmo** — month-end closure sweep, portfolio briefing, capacity, chasing
+- **pm** — project status, month-end prep and lock, approvals, RAID
+- **employee** — timesheet, leave, expenses, my work
+
+Each folder works in three apps:
+
+- **Claude Code:** `/plugin marketplace add ikangai/claude-plugins`, then
+  `/plugin install pm@ikangai` (or `pmo@ikangai`, `employee@ikangai`).
+- **Claude Desktop:** Customize → Plugins → Add → Add marketplace →
+  `ikangai/claude-plugins`; install the plugin, then connect `signals` on its
+  Connectors tab.
+- **ChatGPT desktop:** portable `plugin.json` + `mcp.json` per folder, listed in
+  `.agents/plugins/marketplace.json`. Workspace admins import the repo under
+  Admin → Plugins; for personal use see each folder's `README.md`.
+
 ## Repo layout
 
 ```
