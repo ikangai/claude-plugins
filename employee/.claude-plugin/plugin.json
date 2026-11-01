@@ -1,0 +1,12 @@
+{
+  "name": "employee",
+  "displayName": "IKANGAI Signals Employee Assistant",
+  "version": "0.1.0",
+  "description": "Self-service assistant for a running IKANGAI Signals instance: book and submit your timesheet, request leave, file expenses, and see what's on your plate — via a bundled remote MCP connector (OAuth), no CLI required.",
+  "author": { "name": "Martin Treiber", "email": "martin.treiber@gmail.com" },
+  "repository": "https://github.com/ikangai/CompassAI",
+  "keywords": ["signals", "timesheet", "leave", "expenses", "self-service"],
+  "mcpServers": {
+    "signals": { "type": "http", "url": "https://signals.ikangai.com/mcp" }
+  }
+}

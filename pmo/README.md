@@ -31,14 +31,16 @@ password or token.
 - **A running IKANGAI Signals instance** with the remote-MCP + OAuth surface deployed
   (`/mcp`, `/oauth/*`, `/.well-known/oauth-*`).
 - **A PMO-credentialed account** — you authorize it in the browser when the
-  connector prompts. PM-only logins get scoped (thin) results; employee logins
-  are out of scope.
+  connector prompts. Project managers and employees have their own plugins,
+  `pm` and `employee` (`plugins/pm/`, `plugins/employee/`).
 
 ## Write safety
 
 - **Tier 0**: reads — free.
 - **Tier 1** (autonomous, `dryRun: true` first): `closures create` drafts;
-  chase-text drafting. Every action is listed in the session summary.
+  chase-text drafting; `projects invoices prefill`. (The pm and employee
+  plugins add their own: a user's own Draft timesheet entries and Draft
+  expense claims — the list lives in the shared `signals-operating` skill.) Every action is listed in the session summary.
 - **Tier 2** (confirmed per action): closure approve/reject/lock, invoice status
   changes, timesheet approve/reject, deletes, anything with `forceReplace: true`.
 
@@ -75,12 +77,17 @@ installing.
 
 ## Tests
 
-    node --test plugins/pmo/tests/*.test.mjs
+    node --test plugins/tests/*.test.mjs
+
+One suite for all three role plugins (`plugins/tests/plugins.mjs` lists them):
 
 - `structure.test.mjs` — manifest + frontmatter validation for all
-  skills/agents (incl. the collector's connector-tool scoping).
+  skills/agents (incl. the collector's connector-tool scoping), the marketplace
+  entry, and that `pm`/`employee` carry a byte-identical copy of this plugin's
+  `skills/signals-operating/SKILL.md` (pmo holds the source — edit it here,
+  then `cp` it over).
 - `cli-drift.test.mjs` — every `signals_call {command}` referenced by a skill
-  must exist in the IKANGAI Signals command manifest (imports
+  must exist in the IKANGAI Signals command manifest and run over MCP (imports
   `cli/lib/manifest/index.js` — the same manifest the MCP reuses; zero network).
 
 ## Smoke recipe (behavioral check)

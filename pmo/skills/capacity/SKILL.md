@@ -17,7 +17,7 @@ no fan-out needed; if the response is huge, re-pull filtered (`query:
 {customerId: …}` or `{projectId: …}`) — otherwise read the returned JSON and
 extract what you need.
 Note: a PM-only login sees only its own projects — if the matrix looks thin,
-check `signals_call {command: "whoami"}` and warn.
+check `signals_call {command: "me"}` and warn.
 
 ## Step 2 — Analyze (in context)
 

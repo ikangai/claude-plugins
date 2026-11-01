@@ -21,7 +21,7 @@ Rules:
 - Run ONLY the commands given, exactly as written — and only if they are
   reads. Confirm each command is a read before running it:
   `signals_describe {filter: "<command name>"}` must show the matching
-  command's `write: false`. Built-ins `whoami`, `health`, `preset`, and
+  command's `write: false`. Built-ins `health`, `preset`, `me`, and
   `signals_describe` itself count as reads. If a command is a write, or you
   cannot positively confirm it is a read, refuse that single item — record
   `{"error": "write command refused"}` for it and continue with the rest.
